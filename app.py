@@ -19,14 +19,53 @@ import cv2
 import numpy as np
 import torch
 from flask import Flask, Response, jsonify, render_template, request
+from flask.json.provider import DefaultJSONProvider
 from werkzeug.utils import secure_filename
 
 from detector import CattleDetector
 from reid import CattleReID
 from database import EmbeddingDatabase
 
+
+class NumpyJSONProvider(DefaultJSONProvider):
+    """JSON provider qui gère les types numpy sans planter."""
+
+    def default(self, o):
+        if isinstance(o, np.integer):
+            return int(o)
+        if isinstance(o, np.floating):
+            return float(o)
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        if isinstance(o, (np.bool_,)):
+            return bool(o)
+        return super().default(o)
+
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+# Palette de couleurs distinctes (BGR pour OpenCV)
+PALETTE = [
+    (16, 185, 129),    # vert
+    (59, 130, 246),    # bleu
+    (245, 158, 11),    # orange
+    (236, 72, 153),    # rose
+    (139, 92, 246),    # violet
+    (34, 211, 238),    # cyan
+    (250, 204, 21),    # jaune
+    (248, 113, 113),   # rouge clair
+    (52, 211, 153),    # vert clair
+    (96, 165, 250),    # bleu clair
+]
+
+
+def color_for_name(name: str):
+    """Couleur stable par nom (hash -> index palette)."""
+    h = 0
+    for c in name:
+        h = (h * 31 + ord(c)) & 0xFFFFFFFF
+    return PALETTE[h % len(PALETTE)]
 
 
 # -----------------------------
@@ -42,6 +81,8 @@ STATE = {
     "frame_count": 0,
     "active_animals": [],  # [{name, conf, track_id}, ...] frame courante
     "events": [],          # log court (NEW, MATCH, RENAME)
+    "behavior": [],        # [{name, action, confidence}, ...] activités détectées
+    "track_history": {},   # {track_id: [(x,y,t), ...]} pour analyse comportement
     "source": "",
     "source_label": "",    # nom court pour affichage
     "desired_source": None,  # nouveau chemin à charger (None = pas de changement)
@@ -55,11 +96,13 @@ def parse_args():
     p.add_argument("--source", type=str, default="0")
     p.add_argument("--host", type=str, default="0.0.0.0")
     p.add_argument("--port", type=int, default=5000)
-    p.add_argument("--threshold", type=float, default=0.55)
+    p.add_argument("--threshold", type=float, default=0.70)
     p.add_argument("--db", type=str, default="cattle_db.pkl")
     p.add_argument("--yolo-model", type=str, default="yolo11n.pt")
     p.add_argument("--dino-model", type=str, default="facebook/dinov2-small")
     p.add_argument("--conf", type=float, default=0.4)
+    p.add_argument("--skip-frames", type=int, default=0,
+                   help="Traiter 1 frame sur N (0=toutes). Économise GPU.")
     p.add_argument("--device", type=str, default="auto",
                    help="auto | cpu | cuda | cuda:0 | cuda:1 ...")
     p.add_argument("--no-save", action="store_true")
@@ -109,6 +152,13 @@ def detection_loop(args):
     detector = CattleDetector(model_name=args.yolo_model, device=device)
     reid = CattleReID(model_name=args.dino_model, device=device)
     db = EmbeddingDatabase(path=args.db)
+    # Vérifier la compatibilité dim des embeddings (purge si modèle changé)
+    # On teste avec un dummy crop
+    dummy = np.zeros((128, 128, 3), dtype=np.uint8)
+    sample_emb = reid.get_embedding(dummy)
+    if sample_emb is not None:
+        remaining = db.validate_dim(int(sample_emb.shape[0]))
+        print(f"[DB] Après validation: {remaining} animaux (dim={sample_emb.shape[0]})", flush=True)
 
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
@@ -232,13 +282,23 @@ def detection_loop(args):
                 result = detector.detect(frame, persist=True, conf=args.conf)
                 annotated = frame.copy()
                 active = []
+                behaviors = []
+
+                # Skip frames: si on n'a pas traité cette frame, on garde la précédente
+                if args.skip_frames > 0 and frame_idx % (args.skip_frames + 1) != 0:
+                    STATE["frame_count"] = frame_idx
+                    frame_idx += 1
+                    STATE["frames_skipped"] = STATE.get("frames_skipped", 0) + 1
+                    continue
 
                 if result.boxes is not None and result.boxes.id is not None:
                     boxes = result.boxes.xyxy.cpu().numpy()
                     track_ids = result.boxes.id.int().cpu().numpy()
                     confs = result.boxes.conf.cpu().numpy()
+                    # Liste des masques alignés 1-1 avec boxes/track_ids
+                    masks_data = result.masks.data.cpu().numpy() if result.masks is not None and len(result.masks) > 0 else None
 
-                    for box, tid, conf in zip(boxes, track_ids, confs):
+                    for det_idx, (box, tid, conf) in enumerate(zip(boxes, track_ids, confs)):
                         x1, y1, x2, y2 = map(int, box)
                         x1, y1 = max(0, x1), max(0, y1)
                         x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
@@ -274,18 +334,94 @@ def detection_loop(args):
                                     db.update(track_id_to_name[int(tid)], mean)
 
                         name = track_id_to_name[int(tid)]
-                        color = (0, 255, 0)
-                        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+
+                        # Couleur stable par bovin (basée sur le nom)
+                        color = color_for_name(name)
+
+                        # Segmentation: utiliser directement l'index de détection
+                        # (les masques sont alignés avec boxes par YOLO)
+                        mask_drawn = False
+                        if masks_data is not None and det_idx < len(masks_data):
+                            try:
+                                m = masks_data[det_idx]
+                                mask_resized = cv2.resize(
+                                    m, (annotated.shape[1], annotated.shape[0]),
+                                    interpolation=cv2.INTER_LINEAR,
+                                )
+                                bin_mask = (mask_resized > 0.5).astype(np.uint8)
+                                contours, _ = cv2.findContours(
+                                    bin_mask, cv2.RETR_EXTERNAL,
+                                    cv2.CHAIN_APPROX_SIMPLE,
+                                )
+                                # Tint intérieur très léger
+                                tint = np.zeros_like(annotated)
+                                tint[bin_mask == 1] = color
+                                annotated = cv2.addWeighted(annotated, 1.0, tint, 0.08, 0)
+                                cv2.drawContours(annotated, contours, -1, color, 2)
+                                mask_drawn = True
+                            except Exception:
+                                pass
+
+                        if not mask_drawn:
+                            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+
+                        # Label
                         label = f"{name}  {conf:.2f}"
                         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-                        cv2.rectangle(annotated, (x1, y1 - th - 10), (x1 + tw, y1), color, -1)
-                        cv2.putText(annotated, label, (x1, y1 - 5),
+                        ly1 = max(0, y1 - th - 10)
+                        ly2 = ly1 + th + 10
+                        cv2.rectangle(annotated, (x1, ly1), (x1 + tw, ly2), color, -1)
+                        cv2.putText(annotated, label, (x1, ly1 + th + 2),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
                         active.append({
                             "name": name,
                             "conf": float(conf),
                             "track_id": int(tid),
                         })
+
+                # Analyse comportementale: vitesse et activité basée sur le mouvement
+                t_now = time.time()
+                for det_idx, (box, tid, conf) in enumerate(zip(boxes, track_ids, confs)):
+                    cx = (box[0] + box[2]) / 2
+                    cy = (box[1] + box[3]) / 2
+                    hist = STATE["track_history"].setdefault(int(tid), [])
+                    hist.append((cx, cy, t_now))
+                    # Garder 1 seconde d'historique
+                    STATE["track_history"][int(tid)] = [
+                        p for p in hist if t_now - p[2] < 2.0
+                    ]
+                    pts = STATE["track_history"][int(tid)]
+                    if len(pts) >= 5:
+                        # Vitesse en pixels/seconde
+                        dx = pts[-1][0] - pts[0][0]
+                        dy = pts[-1][1] - pts[0][1]
+                        dist = (dx * dx + dy * dy) ** 0.5
+                        dt = pts[-1][2] - pts[0][2]
+                        speed = dist / max(dt, 1e-3)
+                        # Heuristiques simples
+                        if speed < 5:
+                            action = "immobile"
+                        elif speed < 25:
+                            action = "marche"
+                        elif speed < 80:
+                            action = "court"
+                        else:
+                            action = "rué"
+                        # Vérifier si la tête est en bas (mange) — bounding box plus large que haute
+                        bw = box[2] - box[0]
+                        bh = box[3] - box[1]
+                        aspect = bw / max(bh, 1)
+                        if speed < 5 and aspect > 1.4:
+                            action = "pâture"
+                        # Si la bbox est verticale et vitesse faible → peut être debout statique
+                        behaviors.append({
+                            "name": track_id_to_name.get(int(tid), "?"),
+                            "action": action,
+                            "speed": round(speed, 1),
+                            "track_id": int(tid),
+                        })
+
+                STATE["behavior"] = behaviors[:20]
 
                 # Encodage JPEG pour le stream
                 ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
@@ -323,6 +459,7 @@ def detection_loop(args):
 # Flask
 # -----------------------------
 app = Flask(__name__, template_folder="templates", static_folder="static")
+app.json = NumpyJSONProvider(app)
 
 
 @app.route("/")
@@ -358,6 +495,7 @@ def stats():
         "current_source_path": STATE["current_source_path"],
         "active": STATE["active_animals"],
         "events": STATE["events"],
+        "behavior": STATE.get("behavior", []),
     })
 
 

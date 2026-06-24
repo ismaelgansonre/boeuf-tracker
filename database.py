@@ -30,6 +30,26 @@ class EmbeddingDatabase:
         else:
             print(f"[DB] Nouvelle base (fichier {self.path} sera créé)")
 
+    def validate_dim(self, expected_dim: int) -> int:
+        """
+        Vérifie que tous les embeddings ont la dimension `expected_dim`.
+        Si non, purge la base (changement de modèle Re-ID).
+        Retourne le nombre d'animaux restants.
+        """
+        if not self.animals:
+            return 0
+        bad = []
+        for name, data in self.animals.items():
+            emb = data.get("embedding")
+            if emb is None or emb.shape[0] != expected_dim:
+                bad.append(name)
+        if bad:
+            print(f"[DB] {len(bad)} animaux avec embedding incompatible (dim ≠ {expected_dim}), purge.")
+            for name in bad:
+                del self.animals[name]
+            self.save()
+        return len(self.animals)
+
     def save(self) -> None:
         with open(self.path, "wb") as f:
             pickle.dump(self.animals, f)
