@@ -37,8 +37,10 @@ def parse_args():
     p.add_argument("--conf", type=float, default=0.4)
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--skip-frames", type=int, default=0)
-    p.add_argument("--imgsz", type=int, default=1280,
-                   help="Taille d'inférence YOLO. 1280 = +precis mais +lent")
+    p.add_argument("--imgsz", type=int, default=640,
+                   help="Taille d'inférence YOLO. 640=bon équilibre. <640 = masques dégradés")
+    p.add_argument("--embed-every", type=int, default=10,
+                   help="Recalculer l'embedding DINOv2 tous les N frames (perf)")
     p.add_argument("--no-save", action="store_true")
     return p.parse_args()
 
@@ -149,6 +151,47 @@ def source_webcam():
     return jsonify({"ok": True, "index": idx})
 
 
+@app.route("/api/videos")
+def list_videos():
+    """Liste les vidéos présentes dans le dossier projet (racine + uploads/)."""
+    video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".flv", ".wmv"}
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    found = []
+    # Racine du projet (exclure uploads/ pour éviter doublons)
+    for entry in os.listdir(project_root):
+        full = os.path.join(project_root, entry)
+        if os.path.isfile(full) and os.path.splitext(entry)[1].lower() in video_exts:
+            found.append({
+                "name": entry,
+                "path": os.path.abspath(full),
+                "size_mb": round(os.path.getsize(full) / 1024 / 1024, 1),
+                "source": "project",
+            })
+    # Dossier uploads/
+    if os.path.isdir(UPLOAD_DIR):
+        for entry in os.listdir(UPLOAD_DIR):
+            full = os.path.join(UPLOAD_DIR, entry)
+            if os.path.isfile(full) and os.path.splitext(entry)[1].lower() in video_exts:
+                found.append({
+                    "name": entry,
+                    "path": os.path.abspath(full),
+                    "size_mb": round(os.path.getsize(full) / 1024 / 1024, 1),
+                    "source": "uploads",
+                })
+    return jsonify({"videos": found})
+
+
+@app.route("/api/source/file", methods=["POST"])
+def source_file():
+    """Bascule vers un fichier vidéo par son chemin."""
+    data = request.get_json(silent=True) or {}
+    path = data.get("path", "").strip()
+    if not path or not os.path.exists(path):
+        return jsonify({"ok": False, "error": "fichier introuvable"}), 400
+    STATE["desired_source"] = path
+    return jsonify({"ok": True, "path": path})
+
+
 @app.route("/api/diag")
 def diag():
     return jsonify({
@@ -180,6 +223,90 @@ def reset_db():
     STATE["events"].insert(0, "DB RESET")
     STATE["events"] = STATE["events"][:30]
     return jsonify({"ok": True, "message": "base purgée", "path": db_path})
+
+
+@app.route("/api/restart", methods=["POST"])
+def restart_server():
+    """
+    Demande un redémarrage du serveur (utilisé par le watcher).
+    Le watcher détecte et relance proprement.
+    """
+    STATE["events"].insert(0, "RESTART demandé")
+    STATE["events"] = STATE["events"][:30]
+    # Force un crash volontaire après quelques frames pour que le watcher reprenne
+    def _kill():
+        import os as _os, time as _time
+        _time.sleep(2)
+        _os._exit(0)
+    import threading
+    threading.Thread(target=_kill, daemon=True).start()
+    return jsonify({"ok": True, "message": "redémarrage dans 2s"})
+
+
+@app.route("/api/settings", methods=["GET"])
+def get_settings():
+    """Retourne les paramètres actuels et ceux en attente."""
+    return jsonify({
+        "current": {
+            "yolo_model": STATE["yolo_model_current"],
+            "imgsz": STATE["imgsz_current"],
+            "embed_every": STATE["embed_every_current"],
+            "threshold": STATE["threshold_current"],
+            "conf": STATE["conf_current"],
+        },
+        "models_available": STATE["models_available"],
+        "desired": {
+            "yolo_model": STATE.get("desired_yolo_model"),
+            "imgsz": STATE["desired_imgsz"],
+            "embed_every": STATE["desired_embed_every"],
+            "threshold": STATE["desired_threshold"],
+            "conf": STATE["desired_conf"],
+        },
+    })
+
+
+@app.route("/api/settings", methods=["POST"])
+def set_settings():
+    """Change les paramètres à chaud (sans redémarrer).
+
+    Body JSON, n'importe quelle combinaison de:
+    - yolo_model (str): chemin ou nom du modèle YOLO
+    - imgsz (int): résolution d'inférence YOLO (320, 416, 640, 960, 1280)
+    - embed_every (int): fréquence re-embedding DINOv2
+    - threshold (float): seuil cosine Re-ID (0-1)
+    - conf (float): seuil confiance YOLO (0-1)
+    """
+    data = request.get_json(silent=True) or {}
+    accepted = []
+    if "yolo_model" in data:
+        STATE["desired_yolo_model"] = str(data["yolo_model"])
+        accepted.append(f"yolo_model={data['yolo_model']}")
+    if "imgsz" in data:
+        v = int(data["imgsz"])
+        if v not in (320, 416, 512, 640, 800, 960, 1280):
+            return jsonify({"ok": False, "error": f"imgsz invalide: {v}"}), 400
+        STATE["desired_imgsz"] = v
+        accepted.append(f"imgsz={v}")
+    if "embed_every" in data:
+        v = max(1, int(data["embed_every"]))
+        STATE["desired_embed_every"] = v
+        accepted.append(f"embed_every={v}")
+    if "threshold" in data:
+        v = float(data["threshold"])
+        if not 0 <= v <= 1:
+            return jsonify({"ok": False, "error": "threshold doit être entre 0 et 1"}), 400
+        STATE["desired_threshold"] = v
+        accepted.append(f"threshold={v}")
+    if "conf" in data:
+        v = float(data["conf"])
+        if not 0 < v <= 1:
+            return jsonify({"ok": False, "error": "conf doit être entre 0 et 1"}), 400
+        STATE["desired_conf"] = v
+        accepted.append(f"conf={v}")
+    if accepted:
+        STATE["events"].insert(0, "SETTINGS " + " ".join(accepted))
+        STATE["events"] = STATE["events"][:30]
+    return jsonify({"ok": True, "accepted": accepted})
 
 
 def main():

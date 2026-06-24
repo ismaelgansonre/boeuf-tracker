@@ -77,6 +77,52 @@ function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// === Liste des vidéos du projet ===
+async function loadVideoList() {
+    try {
+        const res = await fetch('/api/videos');
+        const data = await res.json();
+        const sel = $('video-select');
+        const current = sel.value;
+        sel.innerHTML = '<option value="">— Choisir une vidéo du projet —</option>';
+        (data.videos || []).forEach(v => {
+            const opt = document.createElement('option');
+            opt.value = v.path;
+            const tag = v.source === 'uploads' ? '[uploads]' : '[projet]';
+            opt.textContent = `${tag} ${v.name} (${v.size_mb} MB)`;
+            sel.appendChild(opt);
+        });
+        if (current) sel.value = current;
+    } catch (e) {}
+}
+loadVideoList();
+
+$('video-select').addEventListener('change', async (e) => {
+    const path = e.target.value;
+    if (!path) return;
+    const status = $('upload-status');
+    status.textContent = 'Chargement...';
+    status.className = 'text-xs font-mono text-warning';
+    try {
+        const res = await fetch('/api/source/file', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ path })
+        });
+        const data = await res.json();
+        if (data.ok) {
+            status.textContent = '';
+            status.className = 'text-xs font-mono';
+        } else {
+            status.textContent = 'Erreur: ' + data.error;
+            status.className = 'text-xs font-mono text-error';
+        }
+    } catch (err) {
+        status.textContent = 'Erreur: ' + err.message;
+        status.className = 'text-xs font-mono text-error';
+    }
+});
+
 // === Upload vidéo ===
 $('btn-upload').addEventListener('click', () => $('video-input').click());
 
@@ -183,6 +229,26 @@ $('btn-reset-db').addEventListener('click', () => {
     $('modal-reset').showModal();
 });
 
+// === Recharger (rafraîchit la frame MJPEG) ===
+$('btn-reload').addEventListener('click', () => {
+    location.reload();
+});
+
+// === Restart serveur (utilise le watcher) ===
+$('btn-restart').addEventListener('click', async () => {
+    const status = $('upload-status');
+    status.textContent = 'Redémarrage...';
+    status.className = 'text-xs font-mono text-warning';
+    try {
+        await fetch('/api/restart', { method: 'POST' });
+    } catch (e) {}
+    // Attendre 4s puis recharger la page (le watcher aura relancé)
+    setTimeout(() => {
+        status.textContent = 'Redémarrage en cours...';
+        location.reload();
+    }, 3500);
+});
+
 $('btn-reset-confirm').addEventListener('click', async (e) => {
     e.preventDefault();
     try {
@@ -194,6 +260,93 @@ $('btn-reset-confirm').addEventListener('click', async (e) => {
     } catch (err) {
         alert('Erreur: ' + err.message);
     }
+});
+
+// === Settings live ===
+async function loadSettings() {
+    try {
+        const res = await fetch('/api/settings');
+        const data = await res.json();
+        const cur = data.current || {};
+        const sel = $('setting-model');
+        sel.innerHTML = '';
+        (data.models_available || []).forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            sel.appendChild(opt);
+        });
+        if (cur.yolo_model) sel.value = cur.yolo_model;
+        // Boutons imgsz
+        document.querySelectorAll('[data-imgsz]').forEach(btn => {
+            const v = parseInt(btn.dataset.imgsz);
+            if (cur.imgsz === v) btn.classList.add('btn-active');
+            else btn.classList.remove('btn-active');
+        });
+        // Sliders
+        $('setting-embed').value = cur.embed_every || 10;
+        $('setting-embed-val').textContent = cur.embed_every || 10;
+        $('setting-threshold').value = cur.threshold || 0.65;
+        $('setting-threshold-val').textContent = (cur.threshold || 0.65).toFixed(2);
+        $('setting-conf').value = cur.conf || 0.40;
+        $('setting-conf-val').textContent = (cur.conf || 0.40).toFixed(2);
+    } catch (e) {}
+}
+loadSettings();
+
+async function pushSetting(payload) {
+    try {
+        await fetch('/api/settings', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const status = $('settings-status');
+        status.textContent = ' appliqué: ' + Object.entries(payload).map(([k,v]) => `${k}=${v}`).join(', ');
+        setTimeout(() => { status.textContent = ''; }, 2500);
+    } catch (e) {
+        $('settings-status').textContent = 'erreur: ' + e.message;
+        $('settings-status').className = 'text-xs text-error';
+    }
+}
+
+// Model change
+$('setting-model').addEventListener('change', (e) => {
+    pushSetting({ yolo_model: e.target.value });
+});
+
+// imgsz buttons
+document.querySelectorAll('[data-imgsz]').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const v = parseInt(btn.dataset.imgsz);
+        document.querySelectorAll('[data-imgsz]').forEach(b => b.classList.remove('btn-active'));
+        btn.classList.add('btn-active');
+        pushSetting({ imgsz: v });
+    });
+});
+
+// Embed every
+$('setting-embed').addEventListener('input', (e) => {
+    $('setting-embed-val').textContent = e.target.value;
+});
+$('setting-embed').addEventListener('change', (e) => {
+    pushSetting({ embed_every: parseInt(e.target.value) });
+});
+
+// Threshold
+$('setting-threshold').addEventListener('input', (e) => {
+    $('setting-threshold-val').textContent = parseFloat(e.target.value).toFixed(2);
+});
+$('setting-threshold').addEventListener('change', (e) => {
+    pushSetting({ threshold: parseFloat(e.target.value) });
+});
+
+// Conf
+$('setting-conf').addEventListener('input', (e) => {
+    $('setting-conf-val').textContent = parseFloat(e.target.value).toFixed(2);
+});
+$('setting-conf').addEventListener('change', (e) => {
+    pushSetting({ conf: parseFloat(e.target.value) });
 });
 
 // === Init ===

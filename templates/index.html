@@ -30,8 +30,11 @@
     <!-- Source bar -->
     <div class="bg-base-200 border-b border-base-300 px-4 py-2 flex flex-wrap items-center gap-3">
         <span class="text-xs uppercase tracking-wider text-base-content/60 font-semibold">Source</span>
+        <select id="video-select" class="select select-sm select-bordered font-mono text-xs max-w-xs">
+            <option value="">— Choisir une vidéo du projet —</option>
+        </select>
         <input type="file" id="video-input" accept="video/*" class="hidden">
-        <button id="btn-upload" class="btn btn-sm btn-primary">Charger vidéo</button>
+        <button id="btn-upload" class="btn btn-sm btn-outline">Upload</button>
         <button id="btn-webcam" class="btn btn-sm btn-outline">Webcam</button>
         <span id="current-source" class="text-xs font-mono text-base-content/60 ml-2">--</span>
 
@@ -45,6 +48,8 @@
 
         <div class="ml-auto flex items-center gap-2">
             <span id="upload-status" class="text-xs font-mono"></span>
+            <button id="btn-reload" class="btn btn-sm btn-ghost" title="Recharger la page">Recharger</button>
+            <button id="btn-restart" class="btn btn-sm btn-error btn-outline">Restart</button>
             <button id="btn-reset-db" class="btn btn-sm btn-warning btn-outline">Reset DB</button>
         </div>
     </div>
@@ -64,6 +69,58 @@
 
         <!-- Sidebar -->
         <div class="flex flex-col gap-3 overflow-y-auto pr-1">
+            <!-- Paramètres (live, pas besoin de redémarrer) -->
+            <div class="card bg-base-200 border border-base-300">
+                <div class="card-body p-4">
+                    <h3 class="text-xs uppercase tracking-wider text-base-content/60 font-semibold mb-2">Paramètres (live)</h3>
+                    <div class="space-y-3">
+                        <div>
+                            <label class="label py-1"><span class="label-text text-xs">Modèle YOLO</span></label>
+                            <select id="setting-model" class="select select-sm select-bordered w-full font-mono text-xs"></select>
+                            <p id="hint-model" class="text-[10px] text-base-content/50 mt-1">~ ? FPS</p>
+                        </div>
+                        <div>
+                            <label class="label py-1"><span class="label-text text-xs">Résolution (imgsz)</span></label>
+                            <div class="join w-full">
+                                <button class="join-item btn btn-sm btn-outline" data-imgsz="320">320</button>
+                                <button class="join-item btn btn-sm btn-outline" data-imgsz="416">416</button>
+                                <button class="join-item btn btn-sm btn-outline" data-imgsz="640">640</button>
+                                <button class="join-item btn btn-sm btn-outline" data-imgsz="960">960</button>
+                                <button class="join-item btn btn-sm btn-outline" data-imgsz="1280">1280</button>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="label py-1"><span class="label-text text-xs">Re-embed tous les N frames</span></label>
+                            <input id="setting-embed" type="range" min="1" max="60" value="10" class="range range-xs range-primary">
+                            <div class="flex justify-between text-[10px] text-base-content/50">
+                                <span>1 (précis)</span>
+                                <span id="setting-embed-val">10</span>
+                                <span>60 (rapide)</span>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="label py-1"><span class="label-text text-xs">Seuil Re-ID</span></label>
+                            <input id="setting-threshold" type="range" min="0.30" max="0.95" step="0.01" value="0.65" class="range range-xs range-primary">
+                            <div class="flex justify-between text-[10px] text-base-content/50">
+                                <span>0.30 (permissif)</span>
+                                <span id="setting-threshold-val">0.65</span>
+                                <span>0.95 (strict)</span>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="label py-1"><span class="label-text text-xs">Confiance YOLO</span></label>
+                            <input id="setting-conf" type="range" min="0.10" max="0.90" step="0.05" value="0.40" class="range range-xs range-primary">
+                            <div class="flex justify-between text-[10px] text-base-content/50">
+                                <span>0.10 (sensible)</span>
+                                <span id="setting-conf-val">0.40</span>
+                                <span>0.90 (strict)</span>
+                            </div>
+                        </div>
+                        <div id="settings-status" class="text-xs text-success"></div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Animaux -->
             <div class="card bg-base-200 border border-base-300">
                 <div class="card-body p-4">

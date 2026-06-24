@@ -63,6 +63,22 @@ STATE = {
     "current_source_path": None,
     "desired_source": None,
     "desired_device": None,
+    "desired_imgsz": None,        # nouvelle demande de resolution YOLO
+    "desired_embed_every": None,  # nouvelle frequence d'embedding
+    "desired_threshold": None,    # nouveau seuil cosine
+    "desired_conf": None,         # nouvelle confiance YOLO
+    "yolo_model_current": "",     # modele YOLO actif
+    "imgsz_current": 640,
+    "embed_every_current": 10,
+    "threshold_current": 0.65,
+    "conf_current": 0.4,
+    "models_available": [
+        "yolo11n.pt", "yolo11n-seg.pt",
+        "yolo11s.pt", "yolo11s-seg.pt",
+        "yolo11m.pt", "yolo11m-seg.pt",
+        "yolo11l.pt", "yolo11l-seg.pt",
+        "yolo11x.pt", "yolo11x-seg.pt",
+    ],
 }
 
 
