@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Models & data
+*.pt
+*.pth
+*.onnx
+*.pkl
+*.npz
+
+# Media outputs
+screenshot_*.jpg
+videos/
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
