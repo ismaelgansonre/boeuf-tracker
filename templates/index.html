@@ -1,283 +1,118 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="fr" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Boeuf Tracker</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body>
-    <header class="topbar">
-        <div class="brand">Boeuf Tracker</div>
-        <div class="meta">
-            <span id="meta-source">source: --</span>
-            <span class="sep">/</span>
-            <span id="meta-device">device: --</span>
-            <span class="sep">/</span>
-            <span id="meta-fps">fps: --</span>
-            <span class="sep">/</span>
-            <span id="meta-frames">frames: 0</span>
-            <span class="sep">/</span>
-            <span id="meta-started">démarré: --</span>
+<body class="bg-base-100 text-base-content min-h-screen">
+
+    <!-- Topbar -->
+    <div class="navbar bg-base-200 border-b border-base-300 px-4">
+        <div class="flex-1">
+            <span class="text-lg font-bold tracking-wide">Boeuf Tracker</span>
         </div>
-    </header>
-
-    <div class="source-bar">
-        <span class="source-label">Source:</span>
-        <input type="file" id="video-input" accept="video/*" style="display:none">
-        <button id="btn-upload" class="btn">Charger une vidéo</button>
-        <button id="btn-webcam" class="btn btn-secondary">Webcam</button>
-        <span id="current-source" class="current-source">--</span>
-
-        <span class="source-sep">|</span>
-
-        <span class="source-label">Device:</span>
-        <select id="device-select" class="device-select">
-            <option value="auto">Auto</option>
-        </select>
-        <span id="device-status" class="device-status"></span>
-
-        <span id="upload-status" class="upload-status"></span>
+        <div class="flex-none">
+            <div id="meta-bar" class="flex gap-3 text-xs font-mono text-base-content/70">
+                <span id="meta-source">source: --</span>
+                <span class="opacity-30">/</span>
+                <span id="meta-device">device: --</span>
+                <span class="opacity-30">/</span>
+                <span id="meta-fps">fps: --</span>
+                <span class="opacity-30">/</span>
+                <span id="meta-frames">frames: 0</span>
+            </div>
+        </div>
     </div>
 
-    <main class="layout">
-        <section class="video-panel">
-            <div class="video-frame">
-                <img id="stream" src="{{ url_for('video_feed') }}" alt="flux video">
+    <!-- Source bar -->
+    <div class="bg-base-200 border-b border-base-300 px-4 py-2 flex flex-wrap items-center gap-3">
+        <span class="text-xs uppercase tracking-wider text-base-content/60 font-semibold">Source</span>
+        <input type="file" id="video-input" accept="video/*" class="hidden">
+        <button id="btn-upload" class="btn btn-sm btn-primary">Charger vidéo</button>
+        <button id="btn-webcam" class="btn btn-sm btn-outline">Webcam</button>
+        <span id="current-source" class="text-xs font-mono text-base-content/60 ml-2">--</span>
+
+        <div class="divider divider-horizontal mx-1"></div>
+
+        <span class="text-xs uppercase tracking-wider text-base-content/60 font-semibold">Device</span>
+        <select id="device-select" class="select select-sm select-bordered font-mono">
+            <option value="auto">Auto</option>
+        </select>
+        <span id="device-status" class="text-xs font-mono"></span>
+
+        <div class="ml-auto flex items-center gap-2">
+            <span id="upload-status" class="text-xs font-mono"></span>
+            <button id="btn-reset-db" class="btn btn-sm btn-warning btn-outline">Reset DB</button>
+        </div>
+    </div>
+
+    <!-- Main -->
+    <div class="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-4 p-4 h-[calc(100vh-7.5rem)]">
+        <!-- Video -->
+        <div class="flex flex-col min-h-0">
+            <div class="bg-black rounded-lg border border-base-300 flex-1 overflow-hidden flex items-center justify-center min-h-0">
+                <img id="stream" src="/video_feed" alt="flux" class="w-full h-full object-contain">
             </div>
-            <div class="legend">
-                <span class="dot dot-green"></span> bovin identifié
+            <div class="mt-2 text-xs text-base-content/60 flex items-center gap-2">
+                <span class="inline-block w-2.5 h-2.5 rounded-full bg-success"></span>
+                bovin identifié
             </div>
-        </section>
+        </div>
 
-        <aside class="side-panel">
-            <div class="card">
-                <div class="card-title">Animaux détectés</div>
-                <div class="card-sub"><span id="active-count">0</span> actuellement visibles</div>
-                <ul id="animal-list" class="animal-list">
-                    <li class="empty">Aucun animal visible</li>
-                </ul>
-            </div>
-
-            <div class="card">
-                <div class="card-title">Journal</div>
-                <div class="card-sub">Derniers événements</div>
-                <ul id="event-list" class="event-list">
-                    <li class="empty">Aucun événement</li>
-                </ul>
+        <!-- Sidebar -->
+        <div class="flex flex-col gap-3 overflow-y-auto pr-1">
+            <!-- Animaux -->
+            <div class="card bg-base-200 border border-base-300">
+                <div class="card-body p-4">
+                    <h3 class="text-xs uppercase tracking-wider text-base-content/60 font-semibold mb-1">Animaux détectés</h3>
+                    <p class="text-sm mb-2"><span id="active-count" class="text-success font-bold">0</span> actuellement visibles</p>
+                    <ul id="animal-list" class="space-y-1.5">
+                        <li class="text-center text-base-content/40 italic py-2">Aucun animal visible</li>
+                    </ul>
+                </div>
             </div>
 
-            <div class="card">
-                <div class="card-title">Activités</div>
-                <div class="card-sub">Comportement détecté (vitesse)</div>
-                <ul id="behavior-list" class="behavior-list">
-                    <li class="empty">Aucune activité</li>
-                </ul>
+            <!-- Journal -->
+            <div class="card bg-base-200 border border-base-300">
+                <div class="card-body p-4">
+                    <h3 class="text-xs uppercase tracking-wider text-base-content/60 font-semibold mb-1">Journal</h3>
+                    <p class="text-sm mb-2">Derniers événements</p>
+                    <ul id="event-list" class="space-y-1 font-mono text-xs">
+                        <li class="text-center text-base-content/40 italic py-2">Aucun événement</li>
+                    </ul>
+                </div>
             </div>
-        </aside>
-    </main>
 
-    <script>
-        const $ = (id) => document.getElementById(id);
-        let lastSource = '';
+            <!-- Activités -->
+            <div class="card bg-base-200 border border-base-300">
+                <div class="card-body p-4">
+                    <h3 class="text-xs uppercase tracking-wider text-base-content/60 font-semibold mb-1">Activités</h3>
+                    <p class="text-sm mb-2">Comportement détecté (vitesse)</p>
+                    <ul id="behavior-list" class="space-y-1.5">
+                        <li class="text-center text-base-content/40 italic py-2">Aucune activité</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
 
-        async function refreshStats() {
-            try {
-                const res = await fetch('/api/stats');
-                const data = await res.json();
+    <!-- Modal reset DB -->
+    <dialog id="modal-reset" class="modal">
+        <div class="modal-box">
+            <h3 class="font-bold text-lg">Réinitialiser la base ?</h3>
+            <p class="py-4">Tous les bovins identifiés seront oubliés. Les prochaines détections repartiront à zéro (Boeuf_001, Boeuf_002...).</p>
+            <div class="modal-action">
+                <form method="dialog">
+                    <button class="btn btn-ghost mr-2">Annuler</button>
+                    <button id="btn-reset-confirm" class="btn btn-warning">Purger</button>
+                </form>
+            </div>
+        </div>
+    </dialog>
 
-                const sourceLabel = data.source_label || data.source || '--';
-                $('meta-source').textContent = 'source: ' + sourceLabel;
-                $('meta-device').textContent = 'device: ' + (data.device || '--');
-                $('meta-fps').textContent = 'fps: ' + (data.fps || 0).toFixed(1);
-                $('meta-frames').textContent = 'frames: ' + (data.frame_count || 0);
-                $('meta-started').textContent = 'démarré: ' + (data.started_at || '--');
-                $('current-source').textContent = '→ ' + sourceLabel;
-
-                // Si la source a changé, forcer la reconnexion du flux MJPEG
-                if (sourceLabel !== lastSource) {
-                    const img = document.getElementById('stream');
-                    img.src = '{{ url_for('video_feed') }}?t=' + Date.now();
-                    lastSource = sourceLabel;
-                }
-
-                // Synchroniser le select device si le serveur a changé
-                if (!switchingDevice && data.device && deviceSelect.value !== data.device) {
-                    const opts = Array.from(deviceSelect.options).map(o => o.value);
-                    if (opts.includes(data.device)) {
-                        deviceSelect.value = data.device;
-                    }
-                }
-
-                // Animaux actifs
-                const list = $('animal-list');
-                const active = data.active || [];
-                $('active-count').textContent = active.length;
-                if (active.length === 0) {
-                    list.innerHTML = '<li class="empty">Aucun animal visible</li>';
-                } else {
-                    list.innerHTML = active.map(a => `
-                        <li>
-                            <span class="animal-name">${a.name}</span>
-                            <span class="animal-conf">${(a.conf * 100).toFixed(0)}%</span>
-                        </li>
-                    `).join('');
-                }
-
-                // Événements
-                const events = $('event-list');
-                const ev = data.events || [];
-                if (ev.length === 0) {
-                    events.innerHTML = '<li class="empty">Aucun événement</li>';
-                } else {
-                    events.innerHTML = ev.map(e => {
-                        const cls = e.startsWith('NEW') ? 'ev-new' : 'ev-match';
-                        return `<li class="${cls}">${e}</li>`;
-                    }).join('');
-                }
-
-                // Activités
-                const behavior = $('behavior-list');
-                const bh = data.behavior || [];
-                if (bh.length === 0) {
-                    behavior.innerHTML = '<li class="empty">Aucune activité</li>';
-                } else {
-                    behavior.innerHTML = bh.map(b => {
-                        const cls = `bh-${b.action}`;
-                        return `<li class="${cls}">
-                            <span class="bh-name">${b.name}</span>
-                            <span class="bh-action">${b.action}</span>
-                            <span class="bh-speed">${b.speed}px/s</span>
-                        </li>`;
-                    }).join('');
-                }
-            } catch (e) {
-                // silencieux
-            }
-        }
-
-        setInterval(refreshStats, 1000);
-        refreshStats();
-
-        // Upload vidéo
-        document.getElementById('btn-upload').addEventListener('click', () => {
-            document.getElementById('video-input').click();
-        });
-
-        document.getElementById('video-input').addEventListener('change', async (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-            const status = document.getElementById('upload-status');
-            const sizeMB = (file.size / 1024 / 1024).toFixed(1);
-            status.textContent = `Envoi de ${file.name} (${sizeMB} MB)...`;
-            status.className = 'upload-status upload-pending';
-
-            const formData = new FormData();
-            formData.append('video', file);
-
-            try {
-                const res = await fetch('/api/upload-video', { method: 'POST', body: formData });
-                const data = await res.json();
-                if (data.ok) {
-                    status.textContent = `Chargé: ${data.filename}`;
-                    status.className = 'upload-status upload-ok';
-                } else {
-                    status.textContent = `Erreur: ${data.error || 'inconnue'}`;
-                    status.className = 'upload-status upload-err';
-                }
-            } catch (err) {
-                status.textContent = `Erreur réseau: ${err.message}`;
-                status.className = 'upload-status upload-err';
-            }
-            // Reset input pour pouvoir recharger le même fichier
-            e.target.value = '';
-        });
-
-        // Switch webcam
-        document.getElementById('btn-webcam').addEventListener('click', async () => {
-            const status = document.getElementById('upload-status');
-            status.textContent = 'Bascule vers webcam...';
-            status.className = 'upload-status upload-pending';
-            try {
-                const res = await fetch('/api/source/webcam', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-                const data = await res.json();
-                if (data.ok) {
-                    status.textContent = '';
-                    status.className = 'upload-status';
-                }
-            } catch (err) {
-                status.textContent = `Erreur: ${err.message}`;
-                status.className = 'upload-status upload-err';
-            }
-        });
-
-        // Gestion device (CPU/GPU)
-        const deviceSelect = document.getElementById('device-select');
-        const deviceStatus = document.getElementById('device-status');
-        let switchingDevice = false;
-
-        async function loadDevices() {
-            try {
-                const res = await fetch('/api/devices');
-                const data = await res.json();
-                deviceSelect.innerHTML = '';
-                // Auto
-                const optAuto = document.createElement('option');
-                optAuto.value = 'auto';
-                optAuto.textContent = 'Auto';
-                deviceSelect.appendChild(optAuto);
-                // Devices disponibles
-                data.available.forEach(d => {
-                    const opt = document.createElement('option');
-                    opt.value = d;
-                    if (d === 'cpu') {
-                        opt.textContent = 'CPU';
-                    } else if (d.startsWith('cuda:')) {
-                        const idx = d.split(':')[1];
-                        const gpu = (data.gpus || []).find(g => String(g.index) === idx);
-                        opt.textContent = gpu ? `GPU ${idx} (${gpu.name.split(' ').slice(-2).join(' ')})` : `GPU ${idx}`;
-                    } else {
-                        opt.textContent = d.toUpperCase();
-                    }
-                    deviceSelect.appendChild(opt);
-                });
-                deviceSelect.value = data.current;
-            } catch (e) {
-                // silencieux
-            }
-        }
-        loadDevices();
-
-        deviceSelect.addEventListener('change', async () => {
-            if (switchingDevice) return;
-            switchingDevice = true;
-            const target = deviceSelect.value;
-            deviceStatus.textContent = 'bascule...';
-            deviceStatus.className = 'device-status pending';
-            try {
-                const res = await fetch('/api/device', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ device: target })
-                });
-                const data = await res.json();
-                if (data.ok) {
-                    deviceStatus.textContent = `→ ${data.device}`;
-                    deviceStatus.className = 'device-status ok';
-                    // Recharger la liste pour refléter le device actif
-                    await loadDevices();
-                    deviceSelect.value = data.device;
-                } else {
-                    deviceStatus.textContent = data.error || 'erreur';
-                    deviceStatus.className = 'device-status err';
-                }
-            } catch (err) {
-                deviceStatus.textContent = `réseau: ${err.message}`;
-                deviceStatus.className = 'device-status err';
-            } finally {
-                setTimeout(() => { switchingDevice = false; }, 500);
-            }
-        });
-    </script>
+    <script src="/static/app.js"></script>
 </body>
 </html>

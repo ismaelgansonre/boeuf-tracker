@@ -13,9 +13,14 @@ from datetime import datetime
 class EmbeddingDatabase:
     """Base simple de vecteurs d'embeddings par bovin."""
 
-    def __init__(self, path: str = "cattle_db.pkl"):
+    def __init__(self, path: str = "cattle_db.pkl", reid_engine=None):
+        """
+        reid_engine: instance de CattleReID pour calculer les similarités
+        par composante. Si None, fallback sur cosine classique.
+        """
         self.path = path
         self.animals: dict = {}
+        self.reid_engine = reid_engine
         self.load()
 
     def load(self) -> None:
@@ -59,13 +64,28 @@ class EmbeddingDatabase:
     def _cosine(a: np.ndarray, b: np.ndarray) -> float:
         return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
 
-    def match(self, embedding: np.ndarray, threshold: float = 0.55):
-        """Retourne (nom, similarité) du bovin le plus proche, ou (None, sim_max)."""
+    def _similarity(self, embedding: np.ndarray, stored: np.ndarray) -> float:
+        """Utilise ReID.compare si dispo, sinon cosine simple."""
+        if self.reid_engine is not None:
+            return self.reid_engine.compare(embedding, stored)
+        return self._cosine(embedding, stored)
+
+    def match(self, embedding: np.ndarray, threshold: float = 0.55, exclude: set | None = None):
+        """
+        Retourne (nom, similarité) du bovin le plus proche, ou (None, sim_max).
+
+        exclude: ensemble de noms à IGNORER (utilisé pour la déduplication
+        intra-frame: si Boeuf_001 est déjà attribué à un autre track dans
+        la frame courante, on ne peut pas l'attribuer à celui-ci).
+        """
         if not self.animals:
             return None, 0.0
+        exclude = exclude or set()
         best_name, best_sim = None, -1.0
         for name, data in self.animals.items():
-            sim = self._cosine(embedding, data["embedding"])
+            if name in exclude:
+                continue
+            sim = self._similarity(embedding, data["embedding"])
             if sim > best_sim:
                 best_sim = sim
                 best_name = name

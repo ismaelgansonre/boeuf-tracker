@@ -44,8 +44,11 @@ class CattleDetector:
             pass
         print(f"[YOLO] Modèle {model_name} prêt")
 
-    def detect(self, frame, persist: bool = True, conf: float = 0.4):
-        """Détecte + track + segmente les bovins. Retourne results[0]."""
+    def detect(self, frame, persist: bool = True, conf: float = 0.4, imgsz: int = 640):
+        """Détecte + track + segmente les bovins. Retourne results[0].
+
+        imgsz: taille d'inférence. 640 = rapide, 1280 = +precis mais +lent.
+        """
         return self.model.track(
             frame,
             classes=[self.COW_CLASS_ID],
@@ -55,4 +58,5 @@ class CattleDetector:
             conf=conf,
             tracker="bytetrack.yaml",
             half=self.half,
+            imgsz=imgsz,
         )[0]
