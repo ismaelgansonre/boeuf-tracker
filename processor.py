@@ -162,6 +162,13 @@ def detection_loop(args):
     remaining = db.validate_dim(expected_dim)
     print(f"[DB] {remaining} animaux (dim={expected_dim})", flush=True)
 
+    # Sync initial settings to STATE (sinon les boutons UI ne savent pas l'état réel)
+    STATE["yolo_model_current"] = args.yolo_model
+    STATE["imgsz_current"] = args.imgsz
+    STATE["embed_every_current"] = args.embed_every
+    STATE["threshold_current"] = args.threshold
+    STATE["conf_current"] = args.conf
+
     # Capture initiale
     cap = open_capture(source)
     if cap is None:
@@ -193,10 +200,77 @@ def detection_loop(args):
             print(f"[Device] ERREUR: {e}", flush=True)
             return False
 
+    def apply_desired_settings():
+        """Applique les changements demandés via /api/settings à chaud."""
+        nonlocal detector
+
+        # imgsz (changement instantané, pas de reload)
+        d = STATE.get("desired_imgsz")
+        if d is not None and d != STATE.get("imgsz_current"):
+            args.imgsz = d
+            STATE["imgsz_current"] = d
+            STATE["desired_imgsz"] = None
+            STATE["events"].insert(0, f"IMGSZ -> {d}")
+            STATE["events"] = STATE["events"][:30]
+            print(f"[Settings] imgsz -> {d}", flush=True)
+
+        # embed_every (pas de reload, juste fréquence)
+        d = STATE.get("desired_embed_every")
+        if d is not None and d != STATE.get("embed_every_current"):
+            STATE["embed_every_current"] = d
+            STATE["desired_embed_every"] = None
+            STATE["events"].insert(0, f"EMBED_EVERY -> {d}")
+            STATE["events"] = STATE["events"][:30]
+            print(f"[Settings] embed_every -> {d}", flush=True)
+
+        # threshold (pas de reload)
+        d = STATE.get("desired_threshold")
+        if d is not None and abs(d - STATE.get("threshold_current", 0)) > 1e-6:
+            args.threshold = d
+            STATE["threshold_current"] = d
+            STATE["desired_threshold"] = None
+            STATE["events"].insert(0, f"THRESHOLD -> {d:.2f}")
+            STATE["events"] = STATE["events"][:30]
+            print(f"[Settings] threshold -> {d}", flush=True)
+
+        # conf (pas de reload)
+        d = STATE.get("desired_conf")
+        if d is not None and abs(d - STATE.get("conf_current", 0)) > 1e-6:
+            args.conf = d
+            STATE["conf_current"] = d
+            STATE["desired_conf"] = None
+            STATE["events"].insert(0, f"CONF -> {d:.2f}")
+            STATE["events"] = STATE["events"][:30]
+            print(f"[Settings] conf -> {d}", flush=True)
+
+        # yolo_model (reload du modèle, ~2-5s de freeze)
+        d = STATE.get("desired_yolo_model")
+        if d is not None and d != STATE.get("yolo_model_current"):
+            print(f"[YOLO] Reload {STATE.get('yolo_model_current')} -> {d}", flush=True)
+            STATE["events"].insert(0, f"YOLO reload -> {d}")
+            STATE["events"] = STATE["events"][:30]
+            try:
+                old = detector
+                new_det = CattleDetector(model_name=d, device=old.device, half=old.half)
+                detector = new_det
+                STATE["yolo_model_current"] = d
+                STATE["desired_yolo_model"] = None
+                STATE["events"].insert(0, f"YOLO OK: {d}")
+                STATE["events"] = STATE["events"][:30]
+                print(f"[YOLO] Reload OK", flush=True)
+            except Exception as e:
+                STATE["desired_yolo_model"] = None  # clear to avoid loop
+                STATE["events"].insert(0, f"YOLO ERREUR: {e}")
+                STATE["events"] = STATE["events"][:30]
+                print(f"[YOLO] Reload ERREUR: {e}", flush=True)
+
     # Boucle externe: récupère les crashes
     while True:
         try:
             while True:
+                # Applique les changements live (imgsz, embed_every, threshold, conf, model)
+                apply_desired_settings()
+
                 # Device switch
                 desired_dev = STATE.get("desired_device")
                 if desired_dev is not None and desired_dev != STATE.get("device"):
@@ -310,16 +384,24 @@ def detection_loop(args):
                                 track_id_to_name[int(tid)] = "?"
                                 STATE["_track_names"] = track_id_to_name
                         else:
-                            emb = reid.get_embedding(crop)
-                            if emb is not None and emb.shape[0] == expected_dim:
-                                track_emb_accum.setdefault(int(tid), []).append(emb)
-                                # Mise à jour périodique de l'embedding en base
-                                if len(track_emb_accum[int(tid)]) % 15 == 0:
-                                    arrs = track_emb_accum[int(tid)]
-                                    stacked = np.stack(arrs).astype(np.float64)
-                                    mean = stacked.mean(axis=0)
-                                    mean = mean / (np.linalg.norm(mean) + 1e-8)
-                                    db.update(track_id_to_name[int(tid)], mean.astype(np.float32))
+                            # Re-embedding seulement tous les N frames (ByteTrack gère déjà
+                            # le tracking motion, DINOv2 ne sert qu'à rafraïchir l'identité).
+                            reid_every = max(1, int(STATE.get("embed_every_current", 30)))
+                            if frame_idx % reid_every == 0:
+                                emb = reid.get_embedding(crop)
+                                if emb is not None and emb.shape[0] == expected_dim:
+                                    buf = track_emb_accum.setdefault(int(tid), [])
+                                    buf.append(emb)
+                                    # Garde seulement les 4 derniers pour éviter l'explosion mémoire
+                                    if len(buf) > 4:
+                                        track_emb_accum[int(tid)] = buf[-4:]
+                                        buf = track_emb_accum[int(tid)]
+                                    # Moyenne des 2 derniers (plus réactif à la pose actuelle)
+                                    if len(buf) >= 2:
+                                        stacked = np.stack(buf[-2:]).astype(np.float64)
+                                        mean = stacked.mean(axis=0)
+                                        mean = mean / (np.linalg.norm(mean) + 1e-8)
+                                        db.update(track_id_to_name[int(tid)], mean.astype(np.float32))
 
                         name = track_id_to_name[int(tid)]
                         color = color_for_name(name)

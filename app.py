@@ -85,6 +85,20 @@ def stats():
         "active": STATE["active_animals"],
         "events": STATE["events"],
         "behavior": STATE["behavior"],
+        "current": {
+            "yolo_model": STATE.get("yolo_model_current"),
+            "imgsz": STATE.get("imgsz_current"),
+            "embed_every": STATE.get("embed_every_current"),
+            "threshold": STATE.get("threshold_current"),
+            "conf": STATE.get("conf_current"),
+        },
+        "desired": {
+            "yolo_model": STATE.get("desired_yolo_model"),
+            "imgsz": STATE.get("desired_imgsz"),
+            "embed_every": STATE.get("desired_embed_every"),
+            "threshold": STATE.get("desired_threshold"),
+            "conf": STATE.get("desired_conf"),
+        },
     })
 
 

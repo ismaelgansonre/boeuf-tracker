@@ -12,9 +12,31 @@ async function refreshStats() {
         const sourceLabel = data.source_label || data.source || '--';
         $('meta-source').textContent = 'source: ' + sourceLabel;
         $('meta-device').textContent = 'device: ' + (data.device || '--');
-        $('meta-fps').textContent = 'fps: ' + (data.fps || 0).toFixed(1);
+        const fps = data.fps || 0;
+        const fpsEl = $('meta-fps');
+        fpsEl.textContent = 'fps: ' + fps.toFixed(1);
+        fpsEl.className = fps >= 20 ? 'text-success' : fps >= 10 ? 'text-warning' : 'text-error';
         $('meta-frames').textContent = 'frames: ' + (data.frame_count || 0);
         $('current-source').textContent = '→ ' + sourceLabel;
+
+        // Indicateur de changements en attente
+        const desired = data.desired || {};
+        const pending = [];
+        if (desired.imgsz != null) pending.push(`imgsz=${desired.imgsz}`);
+        if (desired.embed_every != null) pending.push(`embed=${desired.embed_every}`);
+        if (desired.threshold != null) pending.push(`th=${desired.threshold}`);
+        if (desired.conf != null) pending.push(`conf=${desired.conf}`);
+        if (desired.yolo_model != null) pending.push(`model=${desired.yolo_model}`);
+        const pendingEl = $('meta-pending');
+        if (pendingEl) {
+            if (pending.length > 0) {
+                pendingEl.textContent = '⏳ ' + pending.join(', ');
+                pendingEl.className = 'text-warning';
+                pendingEl.style.display = '';
+            } else {
+                pendingEl.style.display = 'none';
+            }
+        }
 
         // Reconnexion MJPEG si source a changé
         if (sourceLabel !== lastSource) {
