@@ -3,30 +3,36 @@ gradio_app.py
 -------------
 UI Gradio pour Boeuf Tracker.
 
-Lance le processor (YOLO + DINOv2) dans un thread daemon et sert l'UI
-via Gradio avec `share=True` (tunnel *.gradio.live gratuit, sans config).
+Démarre le processor dans un thread daemon et sert l'UI via Gradio
+avec `share=True` (tunnel *.gradio.live gratuit, sans config).
 
 Avantages vs Flask + cloudflared :
   - Pas de timeout 524 sur les streams longs (Gradio utilise WebSocket).
   - Pas besoin de configurer un tunnel manuellement.
   - UI responsive avec composants interactifs natifs.
-  - Compatible avec Flask en parallèle (même STATE partagé) pour le monitoring.
 
-Usage local :
-    python gradio_app.py
-
-Usage notebook Colab (voir colab.ipynb) :
-    subprocess.Popen([sys.executable, "gradio_app.py", "--source", "...", ...])
+Usage :
+    python gradio_app.py [--source ...] [--yolo-model ...] [--share/--no-share]
 """
 import argparse
 import os
 import shutil
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+# --- Gradio doit être installé avant le reste ---
+try:
+    import gradio as gr
+    print(f"[gradio] version {gr.__version__}", flush=True)
+except ImportError:
+    print("[gradio] FATAL: gradio non installé. Fais: pip install gradio>=4.20.0",
+          file=sys.stderr, flush=True)
+    sys.exit(1)
 
 from state import STATE
 from processor import start_detection_thread
@@ -40,12 +46,14 @@ def parse_args():
     p.add_argument("--source", type=str, default="0")
     p.add_argument("--host", type=str, default="0.0.0.0")
     p.add_argument("--port", type=int, default=7860)
-    p.add_argument("--share", action="store_true", default=True,
-                   help="Crée un tunnel gradio.live public (défaut: True)")
+    p.add_argument("--share", dest="share", action="store_true", default=True)
     p.add_argument("--no-share", dest="share", action="store_false")
     p.add_argument("--yolo-model", type=str, default="yolo11s-seg.pt")
     p.add_argument("--dino-model", type=str, default="facebook/dinov2-small")
     p.add_argument("--threshold", type=float, default=0.65)
+    p.add_argument("--loop-threshold", type=float, default=0.45)
+    p.add_argument("--loop-grace-frames", type=int, default=60)
+    p.add_argument("--max-updates", type=int, default=30)
     p.add_argument("--conf", type=float, default=0.4)
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--imgsz", type=int, default=640)
@@ -55,49 +63,58 @@ def parse_args():
     return p.parse_args()
 
 
-# ---------- Lecture du dernier frame depuis le STATE partagé ----------
-_last_jpg_signature: tuple | None = None
-
-
-def get_latest_frame() -> np.ndarray | None:
-    """Retourne le dernier frame en RGB numpy, ou None si pas encore prêt."""
-    global _last_jpg_signature
-    with STATE["frame_lock"]:
-        jpg = STATE["frame_jpg"]
-    if jpg is None:
+# ---------- Callbacks sûrs (ne lèvent jamais) ----------
+def safe_get_frame():
+    try:
+        with STATE["frame_lock"]:
+            jpg = STATE["frame_jpg"]
+        if jpg is None:
+            return None
+        arr = np.frombuffer(jpg, dtype=np.uint8)
+        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if bgr is None:
+            return None
+        return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    except Exception as e:
+        print(f"[gradio] get_frame: {e}", file=sys.stderr, flush=True)
         return None
-    sig = (id(jpg), len(jpg))
-    if sig == _last_jpg_signature:
-        return None
-    _last_jpg_signature = sig
-    arr = np.frombuffer(jpg, dtype=np.uint8)
-    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if bgr is None:
-        return None
-    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
-def get_stats_dict() -> dict:
-    """Petit résumé pour affichage live (compatible avec ce que /api/stats retourne)."""
-    return {
-        "fps": round(STATE.get("fps", 0.0), 1),
-        "frame_count": STATE.get("frame_count", 0),
-        "device": STATE.get("device", "?"),
-        "source": STATE.get("source_label", "?"),
-        "active": [a.get("name") for a in STATE.get("active_animals", [])],
-        "events": (STATE.get("events") or [])[:5],
-        "current": {
-            "yolo_model": STATE.get("yolo_model_current", "?"),
+def safe_get_stats():
+    try:
+        return {
+            "fps": round(float(STATE.get("fps", 0.0)), 1),
+            "frames": int(STATE.get("frame_count", 0)),
+            "device": str(STATE.get("device", "?")),
+            "source": str(STATE.get("source_label", "?")),
+            "active": [a.get("name") for a in STATE.get("active_animals", [])],
+            "events": (STATE.get("events") or [])[:5],
+            "has_frame": STATE.get("frame_jpg") is not None,
+            "yolo": STATE.get("yolo_model_current", "?"),
             "imgsz": STATE.get("imgsz_current", "?"),
-            "threshold": STATE.get("threshold_current", "?"),
-            "conf": STATE.get("conf_current", "?"),
-            "embed_every": STATE.get("embed_every_current", "?"),
-        },
-        "has_frame": STATE.get("frame_jpg") is not None,
-    }
+        }
+    except Exception as e:
+        print(f"[gradio] get_stats: {e}", file=sys.stderr, flush=True)
+        return {}
 
 
-# ---------- Helpers d'action (mutent le STATE) ----------
+def list_videos() -> list[str]:
+    out: list[str] = []
+    try:
+        for entry in sorted(Path(".").iterdir()):
+            if entry.is_file() and entry.suffix.lower() in VIDEO_EXTS:
+                out.append(str(entry.resolve()))
+        up = Path("uploads")
+        if up.is_dir():
+            for entry in sorted(up.iterdir()):
+                if entry.is_file() and entry.suffix.lower() in VIDEO_EXTS:
+                    out.append(str(entry.resolve()))
+    except Exception as e:
+        print(f"[gradio] list_videos: {e}", file=sys.stderr, flush=True)
+    return out
+
+
+# ---------- Actions (mutent le STATE) ----------
 def action_switch_source(path: str):
     if path and Path(path).exists():
         STATE["desired_source"] = path
@@ -110,83 +127,66 @@ def action_switch_webcam():
     return "✅ Switch demandé → webcam (index 0)"
 
 
-def action_upload_video(file_path: str | None):
-    if not file_path:
-        return "❌ Aucun fichier", gr.update()
-    src = Path(file_path)
-    if src.suffix.lower() not in VIDEO_EXTS:
-        return f"❌ Extension non supportée : {src.suffix}", gr.update()
+def action_upload_video(file_obj):
+    """Accepte un fichier uploadé (objet tempfile gradio) et le déplace dans uploads/."""
+    if file_obj is None:
+        return "❌ Aucun fichier"
+    src = Path(file_obj.name if hasattr(file_obj, "name") else file_obj)
+    if not src.exists() or src.suffix.lower() not in VIDEO_EXTS:
+        return f"❌ Extension non supportée : {src.suffix}"
     upload_dir = Path("uploads")
     upload_dir.mkdir(exist_ok=True)
     dest = upload_dir / f"{int(time.time())}_{src.name}"
     shutil.copy2(src, dest)
     STATE["desired_source"] = str(dest.resolve())
-    return f"✅ Uploadé + switch demandé → {dest.name}", gr.update(choices=list_videos())
+    return f"✅ Uploadé + switch demandé → {dest.name}"
 
 
-def action_set_threshold(v: float):
-    STATE["desired_threshold"] = float(v)
+def action_set_threshold(v):
+    try: STATE["desired_threshold"] = float(v)
+    except Exception: pass
 
+def action_set_conf(v):
+    try: STATE["desired_conf"] = float(v)
+    except Exception: pass
 
-def action_set_conf(v: float):
-    STATE["desired_conf"] = float(v)
+def action_set_embed_every(v):
+    try: STATE["desired_embed_every"] = int(v)
+    except Exception: pass
 
+def action_set_imgsz(v):
+    try: STATE["desired_imgsz"] = int(v)
+    except Exception: pass
 
-def action_set_embed_every(v: int):
-    STATE["desired_embed_every"] = int(v)
+def action_set_model(name):
+    if name: STATE["desired_yolo_model"] = name
 
-
-def action_set_imgsz(v: int):
-    STATE["desired_imgsz"] = int(v)
-
-
-def action_set_model(name: str):
-    if name:
-        STATE["desired_yolo_model"] = name
-
-
-def action_set_device(dev: str):
-    if dev:
-        STATE["desired_device"] = dev
-
+def action_set_device(dev):
+    if dev: STATE["desired_device"] = dev
 
 def action_rematch():
     STATE["desired_rematch"] = True
     STATE["events"].insert(0, "REMATCH demandé via UI")
     STATE["events"] = STATE["events"][:30]
-    return "✅ Re-id forcée — prochaines frames"
-
+    return "✅ Re-id forcée"
 
 def action_reset_db():
-    db_path = Path(STATE.get("db_path", "cattle_db.pkl"))
-    if db_path.exists():
-        db_path.unlink()
-    STATE["active_animals"] = []
-    STATE["track_history"].clear()
-    STATE["events"].insert(0, "DB RESET via UI")
-    STATE["events"] = STATE["events"][:30]
-    return f"✅ Base purgée ({db_path})"
-
-
-# ---------- Liste des vidéos dans le dossier projet ----------
-def list_videos() -> list[str]:
-    out: list[str] = []
-    for entry in sorted(Path(".").iterdir()):
-        if entry.is_file() and entry.suffix.lower() in VIDEO_EXTS:
-            out.append(str(entry.resolve()))
-    uploads = Path("uploads")
-    if uploads.is_dir():
-        for entry in sorted(uploads.iterdir()):
-            if entry.is_file() and entry.suffix.lower() in VIDEO_EXTS:
-                out.append(str(entry.resolve()))
-    return out
+    try:
+        db_path = Path(STATE.get("db_path", "cattle_db.pkl"))
+        if db_path.exists():
+            db_path.unlink()
+        STATE["active_animals"] = []
+        STATE["track_history"].clear()
+        STATE["events"].insert(0, "DB RESET via UI")
+        STATE["events"] = STATE["events"][:30]
+        return f"✅ Base purgée ({db_path})"
+    except Exception as e:
+        return f"❌ {e}"
 
 
 # ---------- Construction de l'UI ----------
 def build_ui():
-    import gradio as gr
-
-    with gr.Blocks(title="Boeuf Tracker", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="Boeuf Tracker", theme=gr.themes.Default()) as demo:
         gr.Markdown("# 🐄 Boeuf Tracker\nYOLOv11 + DINOv2 — Re-ID temps réel")
 
         with gr.Row():
@@ -198,7 +198,7 @@ def build_ui():
                     interactive=False,
                     show_label=False,
                 )
-                status = gr.Markdown("⏳ Démarrage du processor…")
+                status = gr.Markdown("⏳ En attente de la première frame…")
 
             with gr.Column(scale=1):
                 gr.Markdown("### 📂 Source")
@@ -210,11 +210,6 @@ def build_ui():
                 with gr.Row():
                     btn_load = gr.Button("▶ Charger", variant="primary")
                     btn_webcam = gr.Button("📷 Webcam")
-                upload = gr.File(
-                    label="Upload vidéo (.mp4, .mov, …)",
-                    file_types=[".mp4", ".mov", ".avi", ".mkv", ".webm"],
-                )
-                upload_status = gr.Markdown("")
 
                 gr.Markdown("### ⚙️ Modèle & device")
                 model_dd = gr.Dropdown(
@@ -234,12 +229,21 @@ def build_ui():
                 )
 
                 gr.Markdown("### 🎚️ Seuils")
-                threshold_sl = gr.Slider(0.30, 0.95, value=STATE.get("threshold_current", 0.65),
-                                          step=0.01, label="Seuil Re-ID")
-                conf_sl = gr.Slider(0.10, 0.90, value=STATE.get("conf_current", 0.40),
-                                     step=0.05, label="Confiance YOLO")
-                embed_sl = gr.Slider(1, 60, value=STATE.get("embed_every_current", 10),
-                                      step=1, label="Re-embed tous les N frames")
+                threshold_sl = gr.Slider(
+                    0.30, 0.95,
+                    value=STATE.get("threshold_current", 0.65),
+                    step=0.01, label="Seuil Re-ID",
+                )
+                conf_sl = gr.Slider(
+                    0.10, 0.90,
+                    value=STATE.get("conf_current", 0.40),
+                    step=0.05, label="Confiance YOLO",
+                )
+                embed_sl = gr.Slider(
+                    1, 60,
+                    value=STATE.get("embed_every_current", 10),
+                    step=1, label="Re-embed tous les N frames",
+                )
 
                 with gr.Row():
                     btn_rematch = gr.Button("🔄 Re-match")
@@ -247,29 +251,22 @@ def build_ui():
 
                 stats_json = gr.JSON(label="Stats live", value={})
 
-        # === Wiring ===
-        timer_cam = gr.Timer(0.04)        # ~25 fps
-        timer_stats = gr.Timer(1.0)        # 1 Hz
+        # === Auto-refresh via Timer (2 fps cam, 1 Hz stats) ===
+        cam_timer = gr.Timer(0.5, active=True)
+        cam_timer.tick(safe_get_frame, outputs=cam)
 
-        timer_cam.tick(get_latest_frame, outputs=cam)
-        timer_stats.tick(get_stats_dict, outputs=stats_json)
+        stats_timer = gr.Timer(1.0, active=True)
+        stats_timer.tick(safe_get_stats, outputs=stats_json)
 
-        # Source
+        # === Wiring des contrôles ===
         btn_load.click(action_switch_source, inputs=[video_dd], outputs=[status])
         btn_webcam.click(action_switch_webcam, outputs=[status])
-        upload.upload(action_upload_video, inputs=[upload], outputs=[upload_status, video_dd])
-
-        # Modèle
-        model_dd.change(action_set_model, inputs=[model_dd], outputs=[])
-        device_dd.change(action_set_device, inputs=[device_dd], outputs=[])
-        imgsz_dd.change(action_set_imgsz, inputs=[imgsz_dd], outputs=[])
-
-        # Seuils
-        threshold_sl.release(action_set_threshold, inputs=[threshold_sl], outputs=[])
-        conf_sl.release(action_set_conf, inputs=[conf_sl], outputs=[])
-        embed_sl.release(action_set_embed_every, inputs=[embed_sl], outputs=[])
-
-        # Actions
+        model_dd.change(action_set_model, inputs=[model_dd])
+        device_dd.change(action_set_device, inputs=[device_dd])
+        imgsz_dd.change(action_set_imgsz, inputs=[imgsz_dd])
+        threshold_sl.release(action_set_threshold, inputs=[threshold_sl])
+        conf_sl.release(action_set_conf, inputs=[conf_sl])
+        embed_sl.release(action_set_embed_every, inputs=[embed_sl])
         btn_rematch.click(action_rematch, outputs=[status])
         btn_reset.click(action_reset_db, outputs=[status])
 
@@ -279,22 +276,41 @@ def build_ui():
 # ---------- Main ----------
 def main():
     args = parse_args()
-
-    # Persistance du chemin DB pour le reset
     STATE["db_path"] = args.db
 
-    # Démarre le thread processor (cœur métier — déjà thread-safe via STATE)
-    start_detection_thread(args)
+    print(f"[gradio] Démarrage du thread processor…", flush=True)
+    try:
+        start_detection_thread(args)
+        print(f"[gradio] Processor démarré.", flush=True)
+    except Exception as e:
+        print(f"[gradio] FATAL start_detection_thread: {e}", flush=True)
+        traceback.print_exc()
+        sys.exit(1)
 
-    # Construit et lance l'UI
-    demo = build_ui()
-    demo.queue().launch(
-        server_name=args.host,
-        server_port=args.port,
-        share=args.share,
-        show_error=True,
-        prevent_thread_lock=False,
-    )
+    print(f"[gradio] Construction de l'UI…", flush=True)
+    try:
+        demo = build_ui()
+        print(f"[gradio] UI construite.", flush=True)
+    except Exception as e:
+        print(f"[gradio] FATAL build_ui: {e}", flush=True)
+        traceback.print_exc()
+        sys.exit(1)
+
+    print(f"[gradio] Lancement sur {args.host}:{args.port} (share={args.share})…", flush=True)
+    try:
+        demo.launch(
+            server_name=args.host,
+            server_port=args.port,
+            share=args.share,
+            show_error=True,
+            prevent_thread_lock=False,
+        )
+    except KeyboardInterrupt:
+        print(f"[gradio] Arrêté par l'utilisateur.", flush=True)
+    except Exception as e:
+        print(f"[gradio] FATAL launch: {e}", flush=True)
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
