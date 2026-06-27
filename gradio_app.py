@@ -1,18 +1,19 @@
 """
 gradio_app.py
 -------------
-UI Gradio pour Boeuf Tracker.
+UI Gradio EXPÉRIMENTALE pour Boeuf Tracker.
 
-Démarre le processor dans un thread daemon et sert l'UI via Gradio
-avec `share=True` (tunnel *.gradio.live gratuit, sans config).
+⚠️  Le tunnel officiel `gradio.live` (share=True) a un bug upstream
+    (gradio-app/gradio#11553) qui casse les versions Gradio ≥ 5.36.2
+    avec une erreur 404 sur manifest.json. Pour l'instant on utilise
+    Flask + ngrok (voir colab.ipynb).
 
-Avantages vs Flask + cloudflared :
-  - Pas de timeout 524 sur les streams longs (Gradio utilise WebSocket).
-  - Pas besoin de configurer un tunnel manuellement.
-  - UI responsive avec composants interactifs natifs.
+Si tu veux quand même essayer Gradio avec ton propre tunnel ngrok :
+    python gradio_app.py --no-share --port 7860
+    # puis dans un autre terminal :
+    ngrok http 7860
 
-Usage :
-    python gradio_app.py [--source ...] [--yolo-model ...] [--share/--no-share]
+Démarre le processor dans un thread daemon et sert l'UI via Gradio.
 """
 import argparse
 import os

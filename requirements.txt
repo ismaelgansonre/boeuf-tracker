@@ -6,4 +6,5 @@ opencv-python>=4.8.0
 numpy>=1.24.0
 Pillow>=10.0.0
 flask>=3.0.0
-gradio>=4.20.0,<5.36
+pyngrok>=7.0.0
+# gradio>=4.20.0,<5.36  # désactivé — bug #11553 cause 404 sur manifest.json
