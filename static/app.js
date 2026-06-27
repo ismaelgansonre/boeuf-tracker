@@ -66,9 +66,9 @@ async function refreshStats() {
             }
         }
 
-        // Reconnexion MJPEG si source a changé
+        // Refresh immédiat si source a changé (sinon le polling continue)
         if (sourceLabel !== lastSource) {
-            $('stream').src = '/video_feed?t=' + Date.now();
+            refreshStream();
             lastSource = sourceLabel;
         }
 
@@ -463,3 +463,20 @@ if (rematchBtn) {
 // === Init ===
 setInterval(refreshStats, 1000);
 refreshStats();
+
+// === Polling JPEG du flux vidéo (~25 fps) ===
+// Remplace le MJPEG stream qui timeout après ~100s sur Cloudflare (524)
+const streamImg = $('stream');
+let streamTimer = null;
+function refreshStream() {
+    streamImg.src = '/video_feed?t=' + Date.now();
+}
+streamImg.addEventListener('load', () => {
+    clearTimeout(streamTimer);
+    streamTimer = setTimeout(refreshStream, 40);   // ~25 fps
+});
+streamImg.addEventListener('error', () => {
+    clearTimeout(streamTimer);
+    streamTimer = setTimeout(refreshStream, 500);  // back-off si erreur
+});
+refreshStream();

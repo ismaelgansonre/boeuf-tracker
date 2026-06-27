@@ -83,19 +83,16 @@ def index():
 
 @app.route("/video_feed")
 def video_feed():
-    def gen():
-        boundary = b"--frame"
-        while True:
-            with STATE["frame_lock"]:
-                jpg = STATE["frame_jpg"]
-            if jpg is None:
-                import time
-                time.sleep(0.05)
-                continue
-            yield boundary + b"\r\nContent-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
-            import time
-            time.sleep(0.03)
-    return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
+    """Snapshot JPEG unique (polling côté client) — évite le timeout 524 de Cloudflare
+    sur les streams MJPEG keep-alive longs."""
+    with STATE["frame_lock"]:
+        jpg = STATE["frame_jpg"]
+    if jpg is None:
+        return Response(b"", mimetype="image/jpeg", status=204)
+    resp = Response(jpg, mimetype="image/jpeg")
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @app.route("/api/stats")
