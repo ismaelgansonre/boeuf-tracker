@@ -16,6 +16,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from console import info, ok, warn, err, dbg, evt, loop as log_loop
 from detector import CattleDetector
 from reid import CattleReID
 from database import EmbeddingDatabase
@@ -142,11 +143,11 @@ def detection_loop(args):
 
     device = resolve_device(args.device)
     STATE["device"] = device
-    print(f"[Init] Device: {device}", flush=True)
+    ok(f"[Init] Device: {device}")
     if device.startswith("cuda"):
         try:
             idx = int(device.split(":")[1]) if ":" in device else 0
-            print(f"[Init] GPU: {torch.cuda.get_device_name(idx)}", flush=True)
+            ok(f"[Init] GPU: {torch.cuda.get_device_name(idx)}")
         except Exception:
             pass
 
@@ -160,7 +161,7 @@ def detection_loop(args):
     sample_emb = reid.get_embedding(dummy_crop)
     expected_dim = int(sample_emb.shape[0]) if sample_emb is not None else reid.TOTAL_DIM
     remaining = db.validate_dim(expected_dim)
-    print(f"[DB] {remaining} animaux (dim={expected_dim})", flush=True)
+    ok(f"[DB] {remaining} animaux charges (dim={expected_dim})")
 
     # Sync initial settings to STATE (sinon les boutons UI ne savent pas l'état réel)
     STATE["yolo_model_current"] = args.yolo_model
@@ -172,7 +173,7 @@ def detection_loop(args):
     # Capture initiale
     cap = open_capture(source)
     if cap is None:
-        print(f"[Erreur] Source introuvable: {source}", flush=True)
+        err(f"[Init] Source introuvable: {source}")
         return
 
     track_id_to_name = {}
@@ -181,9 +182,16 @@ def detection_loop(args):
     fps_smooth = 0.0
     frame_idx = 0
 
+    # Anti-double-comptage sur vidéo en boucle
+    prev_cap_pos: int = -1
+    loop_detected_at_frame: int = -10**9  # frame_idx du dernier rebobinage
+    max_updates_per_animal: int = max(1, int(getattr(args, "max_updates", 30)))
+    loop_threshold: float = float(getattr(args, "loop_threshold", 0.45))
+    loop_grace_frames: int = max(1, int(getattr(args, "loop_grace_frames", 60)))
+
     def switch_device(new_dev):
         try:
-            print(f"[Device] Switch {STATE['device']} → {new_dev}", flush=True)
+            info(f"[Device] Switch {STATE['device']} -> {new_dev}")
             detector.device = new_dev
             reid.model = reid.model.to(new_dev)
             reid.device = new_dev
@@ -194,17 +202,17 @@ def detection_loop(args):
             STATE["device"] = new_dev
             STATE["events"].insert(0, f"DEVICE -> {new_dev}")
             STATE["events"] = STATE["events"][:30]
-            print(f"[Device] OK sur {new_dev}", flush=True)
+            ok(f"[Device] OK sur {new_dev}")
             return True
         except Exception as e:
-            print(f"[Device] ERREUR: {e}", flush=True)
+            err(f"[Device] ERREUR: {e}")
             return False
 
     def apply_desired_settings():
-        """Applique les changements demandés via /api/settings à chaud."""
+        """Applique les changements demandes via /api/settings a chaud."""
         nonlocal detector
 
-        # imgsz (changement instantané, pas de reload)
+        # imgsz (changement instantane, pas de reload)
         d = STATE.get("desired_imgsz")
         if d is not None and d != STATE.get("imgsz_current"):
             args.imgsz = d
@@ -212,16 +220,16 @@ def detection_loop(args):
             STATE["desired_imgsz"] = None
             STATE["events"].insert(0, f"IMGSZ -> {d}")
             STATE["events"] = STATE["events"][:30]
-            print(f"[Settings] imgsz -> {d}", flush=True)
+            ok(f"[Settings] imgsz -> {d}")
 
-        # embed_every (pas de reload, juste fréquence)
+        # embed_every (pas de reload, juste frequence)
         d = STATE.get("desired_embed_every")
         if d is not None and d != STATE.get("embed_every_current"):
             STATE["embed_every_current"] = d
             STATE["desired_embed_every"] = None
             STATE["events"].insert(0, f"EMBED_EVERY -> {d}")
             STATE["events"] = STATE["events"][:30]
-            print(f"[Settings] embed_every -> {d}", flush=True)
+            ok(f"[Settings] embed_every -> {d}")
 
         # threshold (pas de reload)
         d = STATE.get("desired_threshold")
@@ -231,7 +239,7 @@ def detection_loop(args):
             STATE["desired_threshold"] = None
             STATE["events"].insert(0, f"THRESHOLD -> {d:.2f}")
             STATE["events"] = STATE["events"][:30]
-            print(f"[Settings] threshold -> {d}", flush=True)
+            ok(f"[Settings] threshold -> {d:.2f}")
 
         # conf (pas de reload)
         d = STATE.get("desired_conf")
@@ -241,12 +249,12 @@ def detection_loop(args):
             STATE["desired_conf"] = None
             STATE["events"].insert(0, f"CONF -> {d:.2f}")
             STATE["events"] = STATE["events"][:30]
-            print(f"[Settings] conf -> {d}", flush=True)
+            ok(f"[Settings] conf -> {d:.2f}")
 
-        # yolo_model (reload du modèle, ~2-5s de freeze)
+        # yolo_model (reload du modele, ~2-5s de freeze)
         d = STATE.get("desired_yolo_model")
         if d is not None and d != STATE.get("yolo_model_current"):
-            print(f"[YOLO] Reload {STATE.get('yolo_model_current')} -> {d}", flush=True)
+            info(f"[YOLO] Reload {STATE.get('yolo_model_current')} -> {d}")
             STATE["events"].insert(0, f"YOLO reload -> {d}")
             STATE["events"] = STATE["events"][:30]
             try:
@@ -257,12 +265,12 @@ def detection_loop(args):
                 STATE["desired_yolo_model"] = None
                 STATE["events"].insert(0, f"YOLO OK: {d}")
                 STATE["events"] = STATE["events"][:30]
-                print(f"[YOLO] Reload OK", flush=True)
+                ok(f"[YOLO] Reload OK -> {d}")
             except Exception as e:
                 STATE["desired_yolo_model"] = None  # clear to avoid loop
                 STATE["events"].insert(0, f"YOLO ERREUR: {e}")
                 STATE["events"] = STATE["events"][:30]
-                print(f"[YOLO] Reload ERREUR: {e}", flush=True)
+                err(f"[YOLO] Reload ERREUR: {e}")
 
     # Boucle externe: récupère les crashes
     while True:
@@ -281,7 +289,7 @@ def detection_loop(args):
                 desired = STATE.get("desired_source")
                 if desired is not None:
                     new_src = int(desired) if (isinstance(desired, str) and desired.isdigit()) else desired
-                    print(f"[Switch] -> {new_src}", flush=True)
+                    info(f"[Switch] -> {new_src}")
                     cap.release()
                     new_cap = open_capture(new_src)
                     if new_cap is not None:
@@ -293,11 +301,21 @@ def detection_loop(args):
                         track_emb_accum.clear()
                         STATE["_track_names"] = track_id_to_name
                         reset_for_new_source()
-                        print(f"[Switch] OK: {STATE['source_label']}", flush=True)
+                        ok(f"[Switch] OK: {STATE['source_label']}")
                     else:
                         cap = open_capture(STATE["current_source_path"]) or cap
-                        print(f"[Switch] ERREUR ouverture", flush=True)
+                        err("[Switch] ERREUR ouverture")
                     STATE["desired_source"] = None
+
+                # Re-appariement demande via /api/rematch (force une re-id de tous
+                # les tracks en cours avec le seuil courant).
+                if STATE.pop("desired_rematch", False):
+                    info("[Rematch] Vidage du cache tracks -> re-id au prochain passage")
+                    STATE["events"].insert(0, "REMATCH -> prochaine frame")
+                    STATE["events"] = STATE["events"][:30]
+                    track_id_to_name.clear()
+                    track_emb_accum.clear()
+                    STATE["_track_names"] = track_id_to_name
 
                 t0 = time.time()
                 ret, frame = cap.read()
@@ -318,7 +336,31 @@ def detection_loop(args):
                     else:
                         # Fichier: rebobiner
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    continue  # on re-tentera à la prochaine itération
+                    # Sur webcam on n'invalide pas prev_cap_pos (POS_FRAMES est -1).
+                    # Sur fichier rebobine, le check <prev_cap_pos ci-dessous le detectera.
+                    continue  # on re-tentera a la prochaine iteration
+
+                # Detection d'un rebobinage de fichier (frame_pos qui regresse).
+                # On reset le tracker pour forcer une re-id propre par embedding
+                # et on evite ainsi le double-comptage d'un meme bovin.
+                if not isinstance(STATE["current_source_path"], int):
+                    try:
+                        cur_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                    except Exception:
+                        cur_pos = -1
+                    if prev_cap_pos > 0 and 0 <= cur_pos < prev_cap_pos:
+                        log_loop(
+                            f"Rebobinage detecte ({prev_cap_pos} -> {cur_pos}), "
+                            f"reset du tracker"
+                        )
+                        STATE["events"].insert(0, "LOOP -> tracker reset")
+                        STATE["events"] = STATE["events"][:30]
+                        track_id_to_name.clear()
+                        track_emb_accum.clear()
+                        STATE["_track_names"] = track_id_to_name
+                        loop_detected_at_frame = frame_idx
+                    if cur_pos > 0:
+                        prev_cap_pos = cur_pos
 
                 # Skip frames pour économie GPU
                 if args.skip_frames > 0 and frame_idx % (args.skip_frames + 1) != 0:
@@ -359,19 +401,34 @@ def detection_loop(args):
                         if int(tid) not in track_id_to_name:
                             emb = reid.get_embedding(crop)
                             if emb is not None and emb.shape[0] == expected_dim:
+                                # Pendant les premières frames après un rebobinage,
+                                # on assouplit le seuil pour mieux ré-identifier les
+                                # bovins déjà en base malgré le changement d'angle/pose.
+                                in_loop_grace = (
+                                    frame_idx - loop_detected_at_frame
+                                ) < loop_grace_frames
+                                eff_threshold = (
+                                    loop_threshold if in_loop_grace else args.threshold
+                                )
                                 # Exclure les noms déjà utilisés dans cette frame
                                 name, sim = db.match(
                                     emb,
-                                    threshold=args.threshold,
+                                    threshold=eff_threshold,
                                     exclude=frame_names,
                                 )
                                 event = None
                                 if name is None:
                                     name = f"Boeuf_{len(db.animals) + 1:03d}"
                                     db.add(name, emb)
-                                    event = f"NEW  {name}  (sim_max={sim:.3f})"
+                                    event = (
+                                        f"NEW  {name}  (sim_max={sim:.3f}, "
+                                        f"thr={eff_threshold:.2f})"
+                                    )
                                 else:
-                                    event = f"MATCH {name}  (sim={sim:.3f})"
+                                    event = (
+                                        f"MATCH {name}  (sim={sim:.3f}, "
+                                        f"thr={eff_threshold:.2f})"
+                                    )
                                 track_id_to_name[int(tid)] = name
                                 track_emb_accum[int(tid)] = [emb]
                                 STATE["_track_names"] = track_id_to_name
@@ -401,7 +458,19 @@ def detection_loop(args):
                                         stacked = np.stack(buf[-2:]).astype(np.float64)
                                         mean = stacked.mean(axis=0)
                                         mean = mean / (np.linalg.norm(mean) + 1e-8)
-                                        db.update(track_id_to_name[int(tid)], mean.astype(np.float32))
+                                        # Gel après N updates : évite que l'embedding
+                                        # de référence dérive avec le temps, ce qui
+                                        # empêcherait la ré-id cross-loop / cross-vidéo.
+                                        aname = track_id_to_name[int(tid)]
+                                        cur = (
+                                            db.animals.get(aname, {}).get("count", 0)
+                                            if isinstance(db.animals, dict) and aname in db.animals
+                                            else 0
+                                        )
+                                        if cur < max_updates_per_animal:
+                                            db.update(
+                                                aname, mean.astype(np.float32)
+                                            )
 
                         name = track_id_to_name[int(tid)]
                         color = color_for_name(name)
@@ -428,8 +497,8 @@ def detection_loop(args):
                     STATE["behavior"] = analyze_behavior(boxes, track_ids, time.time(), frame.shape)
 
                 # Encodage JPEG
-                ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                if ok:
+                enc_ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                if enc_ok:
                     with STATE["frame_lock"]:
                         STATE["frame_jpg"] = buf.tobytes()
                         STATE["active_animals"] = active
@@ -442,7 +511,7 @@ def detection_loop(args):
                 frame_idx += 1
 
         except Exception as e:
-            print(f"[Crash] {type(e).__name__}: {e}", flush=True)
+            err(f"[Crash] {type(e).__name__}: {e}")
             import traceback
             traceback.print_exc()
             STATE["events"].insert(0, f"CRASH: {type(e).__name__}")

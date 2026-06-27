@@ -2,6 +2,7 @@
 const $ = (id) => document.getElementById(id);
 let lastSource = '';
 let switchingDevice = false;
+let pushInFlight = false;
 
 // === Refresh stats ===
 async function refreshStats() {
@@ -35,6 +36,33 @@ async function refreshStats() {
                 pendingEl.style.display = '';
             } else {
                 pendingEl.style.display = 'none';
+            }
+        }
+
+        // Boutons imgsz: marquer le bouton actif selon la valeur COURANTE (déjà appliquée)
+        if (data.current && data.current.imgsz != null) {
+            document.querySelectorAll('[data-imgsz]').forEach(btn => {
+                const v = parseInt(btn.dataset.imgsz);
+                if (data.current.imgsz === v) btn.classList.add('btn-active');
+                else btn.classList.remove('btn-active');
+            });
+        }
+        // Sliders: refléter la valeur COURANTE si l'utilisateur n'est pas en train d'éditer
+        if (data.current) {
+            if (data.current.threshold != null && !$('setting-threshold').matches(':active')) {
+                $('setting-threshold').value = data.current.threshold;
+                $('setting-threshold-val').textContent = data.current.threshold.toFixed(2);
+            }
+            if (data.current.conf != null && !$('setting-conf').matches(':active')) {
+                $('setting-conf').value = data.current.conf;
+                $('setting-conf-val').textContent = data.current.conf.toFixed(2);
+            }
+            if (data.current.embed_every != null && !$('setting-embed').matches(':active')) {
+                $('setting-embed').value = data.current.embed_every;
+                $('setting-embed-val').textContent = data.current.embed_every;
+            }
+            if (data.current.yolo_model && $('setting-model').value !== data.current.yolo_model) {
+                $('setting-model').value = data.current.yolo_model;
             }
         }
 
@@ -299,36 +327,89 @@ async function loadSettings() {
             sel.appendChild(opt);
         });
         if (cur.yolo_model) sel.value = cur.yolo_model;
-        // Boutons imgsz
-        document.querySelectorAll('[data-imgsz]').forEach(btn => {
-            const v = parseInt(btn.dataset.imgsz);
-            if (cur.imgsz === v) btn.classList.add('btn-active');
-            else btn.classList.remove('btn-active');
-        });
-        // Sliders
+        // Valeurs initiales (seront ensuite tenues à jour par refreshStats)
         $('setting-embed').value = cur.embed_every || 10;
         $('setting-embed-val').textContent = cur.embed_every || 10;
         $('setting-threshold').value = cur.threshold || 0.65;
         $('setting-threshold-val').textContent = (cur.threshold || 0.65).toFixed(2);
         $('setting-conf').value = cur.conf || 0.40;
         $('setting-conf-val').textContent = (cur.conf || 0.40).toFixed(2);
+        document.querySelectorAll('[data-imgsz]').forEach(btn => {
+            const v = parseInt(btn.dataset.imgsz);
+            if (cur.imgsz === v) btn.classList.add('btn-active');
+            else btn.classList.remove('btn-active');
+        });
     } catch (e) {}
 }
 loadSettings();
 
+// === Re-match : force la re-id de tous les tracks en cours ===
+async function rematch() {
+    const status = $('settings-status');
+    status.textContent = '⏳ re-id de tous les tracks...';
+    status.className = 'text-xs text-warning';
+    try {
+        const res = await fetch('/api/rematch', { method: 'POST' });
+        const d = await res.json();
+        if (d.ok) {
+            status.textContent = '✓ re-id demandée (prochaines frames)';
+            status.className = 'text-xs text-success';
+            setTimeout(() => { status.textContent = ''; }, 3000);
+        } else {
+            status.textContent = '✗ ' + (d.error || 'erreur');
+            status.className = 'text-xs text-error';
+        }
+    } catch (e) {
+        status.textContent = '✗ ' + e.message;
+        status.className = 'text-xs text-error';
+    }
+}
+
 async function pushSetting(payload) {
+    if (pushInFlight) return;
+    pushInFlight = true;
+    const status = $('settings-status');
+    const summary = Object.entries(payload).map(([k,v]) => `${k}=${v}`).join(', ');
+    status.textContent = '⏳ envoi: ' + summary;
+    status.className = 'text-xs text-warning';
     try {
         await fetch('/api/settings', {
             method: 'POST',
             headers: {'Content-Type':'application/json'},
             body: JSON.stringify(payload)
         });
-        const status = $('settings-status');
-        status.textContent = ' appliqué: ' + Object.entries(payload).map(([k,v]) => `${k}=${v}`).join(', ');
-        setTimeout(() => { status.textContent = ''; }, 2500);
+        // Vérifier ce qui a effectivement été appliqué
+        const r = await fetch('/api/settings');
+        const d = await r.json();
+        const cur = d.current || {};
+        const des = d.desired || {};
+        // Pour chaque clé envoyée, vérifier current vs demandé
+        const applied = [];
+        const pending = [];
+        for (const [k, v] of Object.entries(payload)) {
+            const key = k === 'yolo_model' ? 'yolo_model'
+                      : k === 'imgsz' ? 'imgsz'
+                      : k === 'embed_every' ? 'embed_every'
+                      : k === 'threshold' ? 'threshold'
+                      : k === 'conf' ? 'conf' : k;
+            const curVal = cur[key];
+            const eq = (curVal === v) || (typeof curVal === 'number' && Math.abs(curVal - v) < 1e-6);
+            if (eq) applied.push(`${k}=${v}`);
+            else pending.push(`${k}=${v}`);
+        }
+        if (pending.length === 0) {
+            status.textContent = '✓ appliqué: ' + applied.join(', ');
+            status.className = 'text-xs text-success';
+        } else {
+            status.textContent = '⏳ en attente: ' + pending.join(', ');
+            status.className = 'text-xs text-warning';
+        }
+        setTimeout(() => { status.textContent = ''; }, 3500);
     } catch (e) {
-        $('settings-status').textContent = 'erreur: ' + e.message;
-        $('settings-status').className = 'text-xs text-error';
+        status.textContent = '✗ erreur: ' + e.message;
+        status.className = 'text-xs text-error';
+    } finally {
+        pushInFlight = false;
     }
 }
 
@@ -370,6 +451,14 @@ $('setting-conf').addEventListener('input', (e) => {
 $('setting-conf').addEventListener('change', (e) => {
     pushSetting({ conf: parseFloat(e.target.value) });
 });
+
+// Re-match button
+const rematchBtn = $('btn-rematch');
+if (rematchBtn) {
+    rematchBtn.addEventListener('click', () => {
+        rematch();
+    });
+}
 
 // === Init ===
 setInterval(refreshStats, 1000);

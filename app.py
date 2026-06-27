@@ -20,27 +20,53 @@ from werkzeug.utils import secure_filename
 
 from state import STATE, NumpyJSONProvider
 from processor import start_detection_thread, resolve_device
+from console import banner as log_banner, info, ok, warn, err
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 def parse_args():
+    """
+    Défauts optimisés pour GTX 1660 Ti (6 GB) — équilibre perf / détection.
+    Lance simplement:    python app.py
+    Override possible via CLI (voir PERF_GUIDE_1660TI.md).
+    """
     p = argparse.ArgumentParser()
-    p.add_argument("--source", type=str, default="0")
+    p.add_argument("--source", type=str, default="0",
+                   help="'0' = webcam | chemin vidéo | URL RTSP")
     p.add_argument("--host", type=str, default="0.0.0.0")
     p.add_argument("--port", type=int, default=5000)
-    p.add_argument("--threshold", type=float, default=0.65)
+    # --- Modèles (recommandés 1660 Ti) ---
+    p.add_argument("--yolo-model", type=str, default="yolo11s-seg.pt",
+                   help="YOLO recommandé: yolo11s-seg.pt (GTX 1660 Ti). "
+                        "Évite l/x-seg sur 6GB VRAM.")
+    p.add_argument("--dino-model", type=str, default="facebook/dinov2-small",
+                   help="DINOv2 small = parfait pour 1660 Ti. -base/-large = trop lourd.")
+    # --- Re-ID ---
+    p.add_argument("--threshold", type=float, default=0.65,
+                   help="Seuil cosine Re-ID normal (0.6-0.75).")
+    p.add_argument("--loop-threshold", type=float, default=0.45,
+                   help="Seuil permissif juste après un rebobinage vidéo "
+                        "(ré-id cross-loop).")
+    p.add_argument("--loop-grace-frames", type=int, default=60,
+                   help="Frames après rebobinage pendant lesquelles --loop-threshold s'applique.")
+    p.add_argument("--max-updates", type=int, default=30,
+                   help="Stoppe la mise à jour EMA de chaque bovin après N updates. "
+                        "Empêche la dérive de l'embedding de référence.")
     p.add_argument("--db", type=str, default="cattle_db.pkl")
-    p.add_argument("--yolo-model", type=str, default="yolo11l-seg.pt")
-    p.add_argument("--dino-model", type=str, default="facebook/dinov2-small")
-    p.add_argument("--conf", type=float, default=0.4)
-    p.add_argument("--device", type=str, default="auto")
-    p.add_argument("--skip-frames", type=int, default=0)
+    # --- YOLO runtime ---
+    p.add_argument("--conf", type=float, default=0.4,
+                   help="Confiance min YOLO. 0.4 = bon plein air.")
+    p.add_argument("--device", type=str, default="auto",
+                   help="'auto' (CUDA si dispo), 'cpu', 'cuda:0'.")
+    p.add_argument("--skip-frames", type=int, default=0,
+                   help="0 = toutes les frames. 1 = 1 sur 2 (~2x FPS).")
     p.add_argument("--imgsz", type=int, default=640,
-                   help="Taille d'inférence YOLO. 640=bon équilibre. <640 = masques dégradés")
+                   help="Taille d'inférence YOLO. 640=équilibre. "
+                        "416=max FPS. 800=+précision.")
     p.add_argument("--embed-every", type=int, default=10,
-                   help="Recalculer l'embedding DINOv2 tous les N frames (perf)")
+                   help="Recalculer l'embedding DINOv2 tous les N frames (perf).")
     p.add_argument("--no-save", action="store_true")
     return p.parse_args()
 
@@ -239,6 +265,20 @@ def reset_db():
     return jsonify({"ok": True, "message": "base purgée", "path": db_path})
 
 
+@app.route("/api/rematch", methods=["POST"])
+def rematch():
+    """
+    Force le re-appariement des tracks en cours en vidant le cache track_id_to_name.
+    Utile apres un changement de --threshold pour re-evaluer les identites.
+    Le prochain passage de chaque bovin re-passera par db.match() avec
+    le seuil courant (ou --loop-threshold si on vient de boucler).
+    """
+    STATE["desired_rematch"] = True
+    STATE["events"].insert(0, "REMATCH demande")
+    STATE["events"] = STATE["events"][:30]
+    return jsonify({"ok": True, "message": "re-appariement demande"})
+
+
 @app.route("/api/restart", methods=["POST"])
 def restart_server():
     """
@@ -325,11 +365,19 @@ def set_settings():
 
 def main():
     args = parse_args()
-    print("=" * 64)
-    print("  BOEUF TRACKER — Interface web")
-    print(f"  http://{args.host}:{args.port}")
-    print(f"  YOLO: {args.yolo_model} | Device: {args.device} | Imgsz: {args.imgsz}")
-    print("=" * 64)
+    log_banner(
+        "BOEUF TRACKER — Interface web",
+        [
+            f"URL       : http://{args.host}:{args.port}",
+            f"YOLO      : {args.yolo_model}",
+            f"DINOv2    : {args.dino_model}",
+            f"Device    : {args.device}",
+            f"Imgsz     : {args.imgsz}",
+            f"Confiance : {args.conf}",
+            f"Re-ID     : thr={args.threshold}  loop-thr={args.loop_threshold}  "
+            f"grace={args.loop_grace_frames}f  max-upd={args.max_updates}",
+        ],
+    )
     start_detection_thread(args)
     app.run(host=args.host, port=args.port, threaded=True, debug=False, use_reloader=False)
 

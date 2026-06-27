@@ -21,6 +21,8 @@ import torch
 from PIL import Image
 from transformers import AutoModel, AutoImageProcessor
 
+from console import info, ok
+
 
 class CattleReID:
     # Dimensiones des sous-embeddings
@@ -53,7 +55,7 @@ class CattleReID:
         self.w_hsv = hsv_weight / s
         self.w_lbp = lbp_weight / s
 
-        print(f"[DINOv2] Chargement de {model_name} sur {device}...", flush=True)
+        info(f"[DINOv2] Chargement de {model_name} sur {device}...")
         self.processor = AutoImageProcessor.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name).to(device)
         self.model.eval()
@@ -61,7 +63,7 @@ class CattleReID:
             dummy_pil = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
             dummy_in = self.processor(images=dummy_pil, return_tensors="pt").to(self.device)
             _ = self.model(**dummy_in)
-        print(f"[DINOv2] Modèle prêt (dim totale={self.TOTAL_DIM})", flush=True)
+        ok(f"[DINOv2] Pret (dim totale={self.TOTAL_DIM})")
 
     @torch.no_grad()
     def _dino(self, crop_bgr: np.ndarray) -> np.ndarray | None:

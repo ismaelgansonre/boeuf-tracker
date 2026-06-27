@@ -9,6 +9,8 @@ import os
 import numpy as np
 from datetime import datetime
 
+from console import info, ok, warn
+
 
 class EmbeddingDatabase:
     """Base simple de vecteurs d'embeddings par bovin."""
@@ -28,12 +30,12 @@ class EmbeddingDatabase:
             try:
                 with open(self.path, "rb") as f:
                     self.animals = pickle.load(f)
-                print(f"[DB] {len(self.animals)} animaux chargés depuis {self.path}")
+                ok(f"[DB] {len(self.animals)} animaux charges depuis {self.path}")
             except Exception as e:
-                print(f"[DB] Erreur de lecture ({e}), nouvelle base.")
+                warn(f"[DB] Erreur de lecture ({e}), nouvelle base.")
                 self.animals = {}
         else:
-            print(f"[DB] Nouvelle base (fichier {self.path} sera créé)")
+            info(f"[DB] Nouvelle base (fichier {self.path} sera cree)")
 
     def validate_dim(self, expected_dim: int) -> int:
         """
@@ -49,7 +51,7 @@ class EmbeddingDatabase:
             if emb is None or emb.shape[0] != expected_dim:
                 bad.append(name)
         if bad:
-            print(f"[DB] {len(bad)} animaux avec embedding incompatible (dim ≠ {expected_dim}), purge.")
+            warn(f"[DB] {len(bad)} animaux avec embedding incompatible (dim != {expected_dim}), purge.")
             for name in bad:
                 del self.animals[name]
             self.save()
@@ -58,7 +60,7 @@ class EmbeddingDatabase:
     def save(self) -> None:
         with open(self.path, "wb") as f:
             pickle.dump(self.animals, f)
-        print(f"[DB] {len(self.animals)} animaux sauvegardés dans {self.path}")
+        ok(f"[DB] {len(self.animals)} animaux sauvegardes dans {self.path}")
 
     @staticmethod
     def _cosine(a: np.ndarray, b: np.ndarray) -> float:
