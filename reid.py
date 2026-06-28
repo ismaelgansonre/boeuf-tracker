@@ -14,6 +14,11 @@ Combine TROIS signaux complémentaires:
 Le vecteur final est concaténé + normalisé L2.
 Sans entraînement, ce combo surpasse DINOv2 seul pour distinguer des bovins
 de races similaires.
+
+Optimisations:
+- get_embedding_batch(crops): 1 seul forward DINOv2 sur N crops au lieu de N forwards.
+- torch.compile sur le forward si dispo (CUDA + PyTorch 2.0+).
+- Le pipeline reste compatible avec get_embedding() (1 crop).
 """
 import numpy as np
 import cv2
@@ -21,7 +26,7 @@ import torch
 from PIL import Image
 from transformers import AutoModel, AutoImageProcessor
 
-from console import info, ok
+from console import info, ok, warn
 
 
 class CattleReID:
@@ -38,11 +43,14 @@ class CattleReID:
         dino_weight: float = 0.5,
         hsv_weight: float = 0.3,
         lbp_weight: float = 0.2,
+        use_compile: bool = True,
     ):
         """
         Poids des trois composantes. Pour races à motifs (Holstein, Normand):
         garder ces valeurs. Pour races unies (Angus, Charolais): baisser
         dino_weight à 0.3 et monter hsv_weight à 0.5.
+
+        use_compile: applique torch.compile sur le forward DINOv2 si CUDA + PyTorch >= 2.0.
         """
         self.device = device
         self.dino_weight = dino_weight
@@ -59,11 +67,52 @@ class CattleReID:
         self.processor = AutoImageProcessor.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name).to(device)
         self.model.eval()
+
+        # torch.compile: gain ~20-30% sur le forward, gratuit si CUDA
+        self._compiled = False
+        if use_compile and device.startswith("cuda") and hasattr(torch, "compile"):
+            try:
+                self.model = torch.compile(self.model, mode="reduce-overhead")
+                self._compiled = True
+                info("[DINOv2] torch.compile active (mode=reduce-overhead)")
+            except Exception as e:
+                warn(f"[DINOv2] torch.compile echoue ({e}), forward classique.")
+
         with torch.no_grad():
             dummy_pil = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
             dummy_in = self.processor(images=dummy_pil, return_tensors="pt").to(self.device)
             _ = self.model(**dummy_in)
         ok(f"[DINOv2] Pret (dim totale={self.TOTAL_DIM})")
+
+    @torch.no_grad()
+    def _dino_batch(self, crops_rgb: list[np.ndarray]) -> list[np.ndarray | None]:
+        """
+        Forward DINOv2 batché sur N crops RGB.
+        Retourne une liste de N embeddings normalisés (None si shape incompatible).
+        """
+        if not crops_rgb:
+            return []
+        if len(crops_rgb) == 1:
+            emb = self._dino_single(crops_rgb[0])
+            return [emb]
+
+        # PIL batch: gain énorme sur GPU vs N forwards individuels
+        pils = [Image.fromarray(c) for c in crops_rgb]
+        inputs = self.processor(images=pils, return_tensors="pt").to(self.device)
+        out = self.model(**inputs)
+        # last_hidden_state: (B, T, D) → moyenne sur T
+        emb_batch = out.last_hidden_state.mean(dim=1)
+        emb_batch = emb_batch / (emb_batch.norm(dim=-1, keepdim=True) + 1e-8)
+        arrs = emb_batch.cpu().numpy().astype(np.float32)
+        return [a for a in arrs]
+
+    @torch.no_grad()
+    def _dino_single(self, crop_rgb: np.ndarray) -> np.ndarray | None:
+        pil = Image.fromarray(crop_rgb)
+        inputs = self.processor(images=pil, return_tensors="pt").to(self.device)
+        out = self.model(**inputs)
+        emb = out.last_hidden_state.mean(dim=1).flatten().cpu().numpy()
+        return emb / (np.linalg.norm(emb) + 1e-8)
 
     @torch.no_grad()
     def _dino(self, crop_bgr: np.ndarray) -> np.ndarray | None:
@@ -73,28 +122,28 @@ class CattleReID:
         if h < 16 or w < 16:
             return None
         rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-        pil = Image.fromarray(rgb)
-        inputs = self.processor(images=pil, return_tensors="pt").to(self.device)
-        out = self.model(**inputs)
-        emb = out.last_hidden_state.mean(dim=1).flatten().cpu().numpy()
-        return emb / (np.linalg.norm(emb) + 1e-8)
+        return self._dino_single(rgb)
 
     def _hsv_hist(self, crop_bgr: np.ndarray) -> np.ndarray | None:
-        """Histogramme HSV: distribution des teintes, saturation, valeur."""
+        """Histogramme HSV: distribution des teintes, saturation, valeur.
+
+        3 histogrammes 1D concaténés (H:16 + S:16 + V:16 = 48 dim).
+        Note: cv2.calcHist avec channels=[0,1,2] et bins=[16,16,16]
+        retournerait un histogramme 3D joint de 4096 dims — c'est ce que
+        faisait l'ancien code par erreur.
+        """
         if crop_bgr is None or crop_bgr.size == 0:
             return None
         h, w = crop_bgr.shape[:2]
         if h < 32 or w < 32:
             return None
         hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
-        # 16 bins par canal = 48 dim total
-        hist = cv2.calcHist(
-            [hsv], [0, 1, 2], None,
-            [16, 16, 16],
-            [0, 180, 0, 256, 0, 256],
-        ).flatten()
+        h_hist = cv2.calcHist([hsv], [0], None, [16], [0, 180]).flatten()
+        s_hist = cv2.calcHist([hsv], [1], None, [16], [0, 256]).flatten()
+        v_hist = cv2.calcHist([hsv], [2], None, [16], [0, 256]).flatten()
+        hist = np.concatenate([h_hist, s_hist, v_hist]).astype(np.float32)
         hist = hist / (hist.sum() + 1e-8)
-        return hist.astype(np.float32)
+        return hist
 
     @staticmethod
     def _lbp_hist(gray: np.ndarray, grid: int = 4, bins: int = 32) -> np.ndarray:
@@ -161,6 +210,56 @@ class CattleReID:
         ])
         combined = combined / (np.linalg.norm(combined) + 1e-8)
         return combined.astype(np.float32)
+
+    def get_embedding_batch(self, crops_bgr: list[np.ndarray]) -> list[np.ndarray | None]:
+        """
+        Calcule l'embedding pour N crops en UN SEUL forward DINOv2.
+        Pour les composantes HSV/LBP (CPU, peu coûteux), traitement séquentiel.
+
+        Retourne une liste de N embeddings (None si crop inutilisable).
+        Économise ~N×(latence forward) → gain ~Nx sur le forward DINO.
+        """
+        n = len(crops_bgr)
+        if n == 0:
+            return []
+
+        # 1) Pré-filtrer: ne garder que les crops valides pour DINOv2
+        valid_idx = []
+        rgbs: list[np.ndarray] = []
+        for i, c in enumerate(crops_bgr):
+            if c is None or c.size == 0:
+                continue
+            h, w = c.shape[:2]
+            if h < 16 or w < 16:
+                continue
+            valid_idx.append(i)
+            rgbs.append(cv2.cvtColor(c, cv2.COLOR_BGR2RGB))
+
+        # 2) Forward DINOv2 batché
+        dinos: dict[int, np.ndarray] = {}
+        if rgbs:
+            emb_list = self._dino_batch(rgbs)
+            for k, idx in enumerate(valid_idx):
+                dinos[idx] = emb_list[k]
+
+        # 3) Compose embedding final pour chaque crop (HSV/LBP séquentiel)
+        out: list[np.ndarray | None] = [None] * n
+        for i, crop in enumerate(crops_bgr):
+            dino = dinos.get(i)
+            hsv = self._hsv_hist(crop)
+            lbp = self._lbp(crop)
+            if dino is None and hsv is None and lbp is None:
+                continue
+            dino = dino if dino is not None else np.zeros(self.DINO_DIM, dtype=np.float32)
+            hsv = hsv if hsv is not None else np.zeros(self.HSV_DIM, dtype=np.float32)
+            lbp = lbp if lbp is not None else np.zeros(self.LBP_DIM, dtype=np.float32)
+            combined = np.concatenate([
+                dino * self.w_dino,
+                hsv * self.w_hsv,
+                lbp * self.w_lbp,
+            ])
+            out[i] = (combined / (np.linalg.norm(combined) + 1e-8)).astype(np.float32)
+        return out
 
     def compare(self, emb1: np.ndarray, emb2: np.ndarray) -> float:
         """

@@ -26,15 +26,40 @@ UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
+def _pick_default_source() -> str:
+    """
+    Choisit la source par défaut:
+    1. Première vidéo .mp4/.mov/.avi à la racine du projet
+    2. Sinon '0' (webcam)
+    Permet de lancer `python app.py` sans paramètre quand des vidéos
+    de test sont présentes à la racine.
+    """
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    video_exts = (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v")
+    try:
+        for entry in sorted(os.listdir(project_root)):
+            full = os.path.join(project_root, entry)
+            if os.path.isfile(full) and entry.lower().endswith(video_exts):
+                return os.path.abspath(full)
+    except OSError:
+        pass
+    return "0"
+
+
 def parse_args():
     """
     Défauts optimisés pour GTX 1660 Ti (6 GB) — équilibre perf / détection.
     Lance simplement:    python app.py
     Override possible via CLI (voir PERF_GUIDE_1660TI.md).
+
+    Source par défaut: si une vidéo est présente à la racine du projet,
+    elle est utilisée automatiquement. Sinon, webcam ('0').
     """
     p = argparse.ArgumentParser()
-    p.add_argument("--source", type=str, default="0",
-                   help="'0' = webcam | chemin vidéo | URL RTSP")
+    p.add_argument("--source", type=str, default=_pick_default_source(),
+                   help="'0' = webcam | chemin vidéo | URL RTSP. "
+                        "Défaut: 1ère vidéo trouvée à la racine du projet, "
+                        "sinon '0'.")
     p.add_argument("--host", type=str, default="0.0.0.0")
     p.add_argument("--port", type=int, default=5000)
     # --- Modèles (recommandés 1660 Ti) ---
@@ -385,10 +410,15 @@ def set_settings():
 
 def main():
     args = parse_args()
+    src_display = (
+        f"webcam ({args.source})" if str(args.source).isdigit()
+        else os.path.basename(args.source)
+    )
     log_banner(
         "BOEUF TRACKER — Interface web",
         [
             f"URL       : http://{args.host}:{args.port}",
+            f"Source    : {src_display}",
             f"YOLO      : {args.yolo_model}",
             f"DINOv2    : {args.dino_model}",
             f"Device    : {args.device}",
