@@ -85,6 +85,9 @@ def parse_args():
                    help="Confiance min YOLO. 0.4 = bon plein air.")
     p.add_argument("--device", type=str, default="auto",
                    help="'auto' (CUDA si dispo), 'cpu', 'cuda:0'.")
+    p.add_argument("--mlx", action="store_true",
+                   help="Utiliser YOLO26 MLX (Metal GPU Apple) au lieu de YOLO11 "
+                        "PyTorch MPS. ~2.6× plus rapide sur M1/M2/M3/M4.")
     p.add_argument("--skip-frames", type=int, default=0,
                    help="0 = toutes les frames. 1 = 1 sur 2 (~2x FPS).")
     p.add_argument("--imgsz", type=int, default=640,
@@ -173,11 +176,34 @@ def stats():
     })
 
 
+def _mlx_available() -> bool:
+    """Vérifie si MLX (Apple Metal GPU) est disponible."""
+    try:
+        import mlx.core as mx
+        return mx.is_available()
+    except Exception:
+        return False
+
+
+def _mps_available() -> bool:
+    """Vérifie si MPS (Apple Silicon PyTorch) est disponible."""
+    try:
+        import torch
+        return torch.backends.mps.is_available()
+    except Exception:
+        return False
+
+
 @app.route("/api/devices")
 def list_devices():
     import torch
-    available = ["cpu"]
+    available = []
     gpus = []
+    # MLX sur Apple Silicon (Metal GPU) — priorité maximale
+    if STATE["device"] == "mlx" or _mlx_available():
+        available.append("mlx")
+        gpus.append({"index": 0, "id": "mlx", "name": "Apple Metal GPU (MLX)"})
+    # CUDA
     if torch.cuda.is_available():
         for i in range(torch.cuda.device_count()):
             gpus.append({
@@ -186,6 +212,12 @@ def list_devices():
                 "name": torch.cuda.get_device_name(i),
             })
             available.append(f"cuda:{i}")
+    # MPS (fallback Apple)
+    if _mps_available():
+        available.append("mps")
+    # CPU en dernier recours uniquement
+    if not available:
+        available.append("cpu")
     return jsonify({
         "available": available,
         "current": STATE["device"],
@@ -362,6 +394,149 @@ def get_settings():
             "conf": STATE["desired_conf"],
         },
     })
+
+
+@app.route("/api/bench", methods=["GET"])
+def bench_fps():
+    """
+    Benchmark comparatif YOLO sur Apple Silicon.
+    Mesure FPS pour:
+    - YOLO11s-seg sur MPS (actuel)
+    - YOLO26s-seg sur MLX (Apple Metal GPU)
+    - DINOv2-small sur MPS (actuel)
+    """
+    import time, torch, cv2, numpy as np
+    from PIL import Image
+
+    results = {
+        "mps_available": torch.backends.mps.is_available(),
+        "cuda_available": torch.cuda.is_available(),
+        "yolo_mlx_available": False,
+        "yolo_mlx_fps": None,
+        "yolo_mlx_model": None,
+        "yolo_mlx_error": None,
+        "yolo11s_mps_fps": None,
+        "yolo11s_mps_error": None,
+        "dino_mps_fps": None,
+        "dino_mps_error": None,
+        "coreml_dino_available": False,
+        "coreml_dino_fps": None,
+        "coreml_dino_error": None,
+    }
+
+    # --- Test image (1 frame, même condition pour tous) ---
+    dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
+    # Dessine 3 "bovins" simulés pour avoir des détections
+    for i in range(3):
+        x, y = 100 + i * 180, 150
+        cv2.ellipse(dummy_img, (x, y), (60, 40), 0, 0, 360, (255, 255, 255), -1)
+
+    warmup_runs = 3
+    bench_runs = 20
+
+    # ===== 1. YOLO11s-seg sur MPS =====
+    if torch.backends.mps.is_available():
+        try:
+            from ultralytics import YOLO
+            model11 = YOLO("yolo11s-seg.pt")
+            model11.to("mps")
+
+            # Warmup
+            for _ in range(warmup_runs):
+                model11.predict(source=dummy_img, device="mps")
+
+            # Bench
+            t0 = time.perf_counter()
+            for _ in range(bench_runs):
+                model11.predict(source=dummy_img, device="mps")
+            elapsed = time.perf_counter() - t0
+            results["yolo11s_mps_fps"] = round(bench_runs / elapsed, 1)
+        except Exception as e:
+            results["yolo11s_mps_error"] = str(e)
+
+    # ===== 2. YOLO26s-seg sur MLX =====
+    try:
+        import os as _os
+        from yolo26mlx import YOLO as YOLO26
+
+        # Use pre-converted safetensors if available, otherwise .pt (will convert on first run)
+        pt_path = _os.path.join(_os.path.dirname(__file__), "yolo26s-seg.pt")
+        safetensors_path = _os.path.join(_os.path.dirname(__file__), "yolo26s-seg.safetensors")
+        model_path = safetensors_path if _os.path.exists(safetensors_path) else pt_path
+
+        model26 = YOLO26(model_path)
+        results["yolo_mlx_available"] = True
+
+        # Warmup
+        for _ in range(warmup_runs):
+            model26.predict(dummy_img)
+
+        # Bench
+        t0 = time.perf_counter()
+        for _ in range(bench_runs):
+            model26.predict(dummy_img)
+        elapsed = time.perf_counter() - t0
+        results["yolo_mlx_fps"] = round(bench_runs / elapsed, 1)
+        results["yolo_mlx_model"] = "yolo26s-seg"
+    except ImportError:
+        results["yolo_mlx_error"] = "yolo26mlx non installé"
+    except Exception as e:
+        results["yolo_mlx_error"] = str(e)
+
+    # ===== 3. DINOv2-small sur MPS (1 crop) =====
+    if torch.backends.mps.is_available():
+        try:
+            from transformers import AutoModel, AutoImageProcessor
+
+            dino_model = AutoModel.from_pretrained("facebook/dinov2-small")
+            dino_proc = AutoImageProcessor.from_pretrained("facebook/dinov2-small")
+            dino_model.to("mps")
+            dino_model.eval()
+
+            crop = cv2.resize(dummy_img[100:350, 80:200], (224, 224))
+            crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+            pil = Image.fromarray(crop_rgb)
+
+            # Warmup
+            for _ in range(warmup_runs):
+                with torch.no_grad():
+                    inputs = dino_proc(images=pil, return_tensors="pt").to("mps")
+                    dino_model(**inputs)
+
+            # Bench
+            t0 = time.perf_counter()
+            for _ in range(bench_runs):
+                with torch.no_grad():
+                    inputs = dino_proc(images=pil, return_tensors="pt").to("mps")
+                    dino_model(**inputs)
+            elapsed = time.perf_counter() - t0
+            results["dino_mps_fps"] = round(bench_runs / elapsed, 1)
+        except Exception as e:
+            results["dino_mps_error"] = str(e)
+
+    # ===== 4. DINOv2 sur CoreML (si déjà converti) =====
+    import os as _os
+    coreml_path = _os.path.join(_os.path.dirname(__file__), "dinov2-small.mlpackage")
+    if _os.path.isdir(coreml_path):
+        try:
+            import coremltools as ct
+            coreml_model = ct.models.MLModel(coreml_path)
+            results["coreml_dino_available"] = True
+
+            # Warmup
+            for _ in range(warmup_runs):
+                coreml_model.predict({"input_image": pil})
+
+            # Bench
+            t0 = time.perf_counter()
+            for _ in range(bench_runs):
+                coreml_model.predict({"input_image": pil})
+            elapsed = time.perf_counter() - t0
+            results["coreml_dino_fps"] = round(bench_runs / elapsed, 1)
+        except Exception as e:
+            results["coreml_dino_error"] = str(e)
+
+    return jsonify(results)
 
 
 @app.route("/api/settings", methods=["POST"])

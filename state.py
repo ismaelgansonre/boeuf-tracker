@@ -73,6 +73,9 @@ STATE = {
     "threshold_current": 0.65,
     "conf_current": 0.4,
     "models_available": [
+        # YOLO26 MLX (Metal GPU Apple Silicon - recommandee)
+        "yolo26s-seg.safetensors",
+        # YOLO11 standard
         "yolo11n.pt", "yolo11n-seg.pt",
         "yolo11s.pt", "yolo11s-seg.pt",
         "yolo11m.pt", "yolo11m-seg.pt",

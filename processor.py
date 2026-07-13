@@ -69,7 +69,7 @@ _BEHAVIOR_LABELS = ("couché", "pâture", "boit", "immobile", "marche", "court",
 
 
 from console import info, ok, warn, err, dbg, evt, loop as log_loop
-from detector import CattleDetector
+from detector import CattleDetector, CattleDetectorMLX
 from reid import CattleReID
 from database import EmbeddingDatabase
 from state import STATE, color_for_name, reset_for_new_source
@@ -153,11 +153,29 @@ def analyze_behavior(boxes, track_ids, t_now, frame_shape=None):
     return behaviors
 
 
+def _mlx_available() -> bool:
+    """Vérifie si MLX (Apple Metal GPU) est disponible."""
+    try:
+        import mlx.core as mx
+        return mx.is_available()
+    except Exception:
+        return False
+
+
 def resolve_device(requested: str) -> str:
-    if requested == "auto":
-        return "cuda" if torch.cuda.is_available() else "cpu"
+    # MLX = priorité maximale sur Apple Silicon
+    if requested in ("auto", "mlx"):
+        if _mlx_available():
+            return "mlx"
+        if torch.cuda.is_available():
+            return "cuda:0"
+        if torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
     if requested == "cpu":
         return "cpu"
+    if requested == "mps":
+        return "mps" if torch.backends.mps.is_available() else "cpu"
     if requested.startswith("cuda"):
         if not torch.cuda.is_available():
             return "cpu"
@@ -181,19 +199,35 @@ def detection_loop(args):
     STATE["source_label"] = source_label(source)
     STATE["started_at"] = datetime.now().isoformat(timespec="seconds")
 
-    device = resolve_device(args.device)
-    STATE["device"] = device
-    ok(f"[Init] Device: {device}")
-    if device.startswith("cuda"):
-        try:
-            idx = int(device.split(":")[1]) if ":" in device else 0
-            ok(f"[Init] GPU: {torch.cuda.get_device_name(idx)}")
-        except Exception:
-            pass
+    # MLX: YOLO26 sur Metal GPU Apple (2.6× plus rapide que PyTorch MPS)
+    use_mlx = getattr(args, "mlx", False)
+    if use_mlx:
+        device = "mlx"
+        STATE["device"] = "mlx"
+        ok(f"[Init] Device: mlx (YOLO26 Metal GPU)")
+        # Resolve device for ReID (still uses MPS for DINOv2)
+        reid_device = resolve_device(args.device) if args.device != "auto" else "mps"
+    else:
+        device = resolve_device(args.device)
+        STATE["device"] = device
+        ok(f"[Init] Device: {device}")
+        if device.startswith("cuda"):
+            try:
+                idx = int(device.split(":")[1]) if ":" in device else 0
+                ok(f"[Init] GPU: {torch.cuda.get_device_name(idx)}")
+            except Exception:
+                pass
+        reid_device = device
 
     # Modèles
-    detector = CattleDetector(model_name=args.yolo_model, device=device)
-    reid = CattleReID(model_name=args.dino_model, device=device)
+    if use_mlx:
+        info(f"[YOLO26-MLX] Utilisation de CattleDetectorMLX...")
+        # When --mlx, use yolo26s-seg.safetensors (or the user-specified model)
+        mlx_model = args.yolo_model if args.yolo_model != "yolo11s-seg.pt" else "yolo26s-seg.safetensors"
+        detector = CattleDetectorMLX(model_name=mlx_model, device="mlx")
+    else:
+        detector = CattleDetector(model_name=args.yolo_model, device=device)
+    reid = CattleReID(model_name=args.dino_model, device=reid_device)
     db = EmbeddingDatabase(path=args.db, reid_engine=reid)
 
     # Validation compatibilité dim

@@ -20,6 +20,15 @@ pip install -r requirements.txt
 
 ## Utilisation
 
+### Interface web Next.js (shadcn + pnpm)
+```bash
+python app.py
+cd frontend
+pnpm dev
+```
+
+Puis ouvrir `http://localhost:3000`.
+
 ### Mode interactif (menu)
 ```powershell
 python main.py
