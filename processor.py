@@ -86,7 +86,7 @@ from detector import CattleDetector, CattleDetectorMLX
 from reid import CattleReID
 from database import EmbeddingDatabase
 from reid_worker import ReIDWorker
-from breed import classify_breed
+from breed import classify_breed, get_clip_engine
 from names import make_name_generator
 from analytics import init as init_analytics, get as get_analytics, DetectionSample
 from state import STATE, color_for_name, reset_for_new_source
@@ -318,6 +318,17 @@ def detection_loop(args):
     # Analytics : accumule FPS, races, positions pour le dashboard
     analytics = init_analytics(lambda: STATE)
     ok(f"[Analytics] Collecteur démarré (sampling 2s, dashboard + heatmap)")
+    # Pre-charge CLIP (classification de race zero-shot) pour eviter un delai
+    # de ~15s au moment du 1er nouvel animal detecte. Non bloquant : si CLIP
+    # est indisponible, on retombe sur le fallback HSV de breed.classify_breed.
+    try:
+        engine = get_clip_engine()
+        if engine is not None:
+            ok(f"[Breed] CLIP zero-shot pret ({len(engine.race_names)} races)")
+        else:
+            warn("[Breed] CLIP indisponible, fallback HSV active")
+    except Exception as e:
+        warn(f"[Breed] Pre-charge CLIP echoue ({e}), fallback HSV")
 
     # Validation compatibilité dim
     dummy_crop = np.zeros((128, 128, 3), dtype=np.uint8)

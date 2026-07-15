@@ -565,18 +565,20 @@ async function refreshDashboard() {
         fpsChart.data.datasets[0].data = d.fps_history.map(p => p.fps);
         fpsChart.update('none');
 
-        // Chart races (avec couleurs)
+        // Chart races (couleurs depuis breed_colors envoye par le backend)
         const races = d.race_counts;
+        const colors = d.breed_colors || {};
+        const colorFor = r => colors[r] || COAT_COLORS[r] || '#888888';
         racesChart.data.labels = Object.keys(races);
         racesChart.data.datasets[0].data = Object.values(races);
         racesChart.data.datasets[0].backgroundColor =
-            Object.keys(races).map(r => COAT_COLORS[r] || '#888');
+            Object.keys(races).map(colorFor);
         racesChart.update('none');
         // Legend custom
         const total = Object.values(races).reduce((a, b) => a + b, 0) || 1;
         $('races-legend').innerHTML = Object.entries(races).map(([r, c]) => `
             <span class="legend-item">
-                <span class="legend-swatch" style="background:${COAT_COLORS[r] || '#888'}"></span>
+                <span class="legend-swatch" style="background:${colorFor(r)}"></span>
                 ${escapeHtml(r)} (${Math.round(c/total*100)}%)
             </span>
         `).join('');

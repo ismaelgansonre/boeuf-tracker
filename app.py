@@ -404,11 +404,19 @@ def get_settings():
 
 @app.route("/api/breeds")
 def list_breeds():
-    """Liste toutes les races connues avec leurs descriptions (pour l'UI Bun)."""
+    """Liste toutes les races connues avec leurs descriptions (pour l'UI Bun).
+
+    On n'expose pas le prompt CLIP brut (detail d'implementation interne) :
+    on renvoie seulement les champs utiles a l'affichage.
+    """
     from breed import BREEDS
     return jsonify({
         "breeds": [
-            {"name": name, **info}
+            {"name": name,
+             "origin": info.get("origin", ""),
+             "use": info.get("use", ""),
+             "desc": info.get("desc", ""),
+             "swatch": info.get("swatch", "#555555")}
             for name, info in BREEDS.items()
         ],
         "count": len(BREEDS),

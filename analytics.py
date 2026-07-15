@@ -202,7 +202,19 @@ class AnalyticsCollector:
             }
             # Total animaux uniques
             data["unique_animals"] = self._count_unique()
-            return data
+        # Map nom-de-race -> couleur hex (pour le chart donut et la legende).
+        # Prend les swatches definis dans breed.BREEDS ; les robes-type HSV
+        # de l'ancien format sont aussi couverts via breed.COAT_SWATCHES.
+        try:
+            from breed import BREEDS, COAT_SWATCHES
+            data["breed_colors"] = {
+                name: info.get("swatch", "#888888")
+                for name, info in BREEDS.items()
+            }
+            data["breed_colors"].update(COAT_SWATCHES)
+        except Exception:
+            data["breed_colors"] = {}
+        return data
 
     def get_heatmap(self) -> dict:
         """Retourne les positions pour la heatmap.
