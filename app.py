@@ -15,7 +15,7 @@ Serveur Flask minimal. Démarre le thread de détection et expose:
 import argparse
 import os
 
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, send_from_directory
 from werkzeug.utils import secure_filename
 
 from state import STATE, NumpyJSONProvider
@@ -104,6 +104,9 @@ def parse_args():
     p.add_argument("--embed-every", type=int, default=10,
                    help="Recalculer l'embedding DINOv2 tous les N frames (perf).")
     p.add_argument("--no-save", action="store_true")
+    p.add_argument("--ui-dir", type=str, default="web/public",
+                   help="Repertoire de l'UI statique (defaut: web/public). "
+                        "Permet au worker de servir l'interface sans Bun.")
     return p.parse_args()
 
 
@@ -114,14 +117,38 @@ app.json = NumpyJSONProvider(app)
 
 @app.route("/")
 def index():
-    """Point d'entrée du worker API. L'UI est servie par Bun (port 8000)."""
+    """Sert l'UI web (web/public/index.html).
+
+    Permet de se passer du serveur Bun : le worker Python sert a la fois
+    l'API (/api/*, /video_feed) et l'interface statique. Les URLs relatives
+    du JS (fetch('/api/stats')) restent valides car tout est sur le meme origin.
+    """
+    index_path = os.path.join(STATE["ui_dir"], "index.html")
+    if os.path.exists(index_path):
+        return send_from_directory(STATE["ui_dir"], "index.html")
+    # Fallback : JSON de service si l'UI n'est pas trouvee (mode API-only)
     return jsonify({
         "service": "boeuf-tracker-worker",
         "version": "2.0",
         "endpoints": ["/api/stats", "/api/devices", "/api/settings",
                       "/api/videos", "/api/breeds", "/video_feed"],
-        "ui": "L'interface web est servie par Bun sur http://localhost:8000",
+        "ui": f"Interface non trouvee dans {STATE['ui_dir']}",
     })
+
+
+@app.route("/<path:filename>")
+def static_assets(filename):
+    """Sert les assets statiques de l'UI (app.js, styles.css, etc.).
+
+    On exclut les routes connues (api/*, video_feed) qui sont declarees
+    explicitement ailleurs. Flask essaie les routes specifiques avant
+    celle-ci car elle est declaree en dernier parmi les catch-all.
+    """
+    safe = os.path.join(STATE["ui_dir"], filename)
+    if os.path.isfile(safe):
+        return send_from_directory(STATE["ui_dir"], filename)
+    # Route inconnue -> 404 JSON (evite la boucle sur les appels API manquants)
+    return jsonify({"error": f"ressource inconnue: /{filename}"}), 404
 
 
 @app.route("/video_feed")
@@ -668,6 +695,9 @@ def set_settings():
 
 def main():
     args = parse_args()
+    # Repertoire de l'UI : permet au worker de servir l'interface sans Bun.
+    # On resout en chemin absolu pour que ca marche quel que soit le cwd.
+    STATE["ui_dir"] = os.path.abspath(args.ui_dir)
     src_display = (
         f"webcam ({args.source})" if str(args.source).isdigit()
         else os.path.basename(args.source)

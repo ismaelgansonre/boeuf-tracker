@@ -36,3 +36,7 @@ web/node_modules/
 web/bun.lock
 web/data/
 web/dist/
+
+# Tauri / Rust (build artifacts volumineux)
+src-tauri/target/
+src-tauri/gen/

@@ -72,6 +72,7 @@ STATE = {
     "embed_every_current": 10,
     "threshold_current": 0.65,
     "conf_current": 0.4,
+    "ui_dir": "web/public",       # repertoire de l'UI statique (sert sans Bun)
     "models_available": [
         # YOLO26 MLX (Metal GPU Apple Silicon - recommandee)
         "yolo26s-seg.safetensors",
