@@ -338,3 +338,263 @@ function refreshStream() { streamImg.src = '/video_feed?t=' + Date.now(); }
 streamImg.addEventListener('load', () => { clearTimeout(streamTimer); streamTimer = setTimeout(refreshStream, 40); });
 streamImg.addEventListener('error', () => { clearTimeout(streamTimer); streamTimer = setTimeout(refreshStream, 500); });
 refreshStream();
+
+// ═══════════════════════════════════════════════════════════════
+//  DASHBOARD — Charts (Chart.js) + Heatmap (Canvas) + Timeline
+// ═══════════════════════════════════════════════════════════════
+
+// ── Toggle panneau ──
+const dashPanel = $('dashboard-panel');
+$('btn-dashboard').addEventListener('click', () => {
+    dashPanel.classList.add('open');
+    refreshDashboard();
+});
+$('btn-dashboard-close').addEventListener('click', () => dashPanel.classList.remove('open'));
+
+// ── Config couleurs par robe-type (mêmes swatches que Python) ──
+const COAT_COLORS = {
+    "Noir uni":         "#1a1a1a",
+    "Blanc uni":        "#f0ebe0",
+    "Pie noir":         "#2a2a2a",
+    "Pie fauve":        "#c8a06a",
+    "Pie rouge":        "#b85c3a",
+    "Fauve uni":        "#c89858",
+    "Rouge / acajou":   "#9e3d22",
+    "Gris":             "#8a8a8a",
+    "Bringe":           "#6b4a2a",
+    "Indeterminee":     "#555555",
+};
+
+// Chart.js defaults
+Chart.defaults.color = getComputedStyle(document.documentElement)
+    .getPropertyValue('--text-muted').trim();
+Chart.defaults.borderColor = getComputedStyle(document.documentElement)
+    .getPropertyValue('--border').trim();
+
+// ── Chart FPS ──
+const fpsCtx = $('chart-fps').getContext('2d');
+const fpsChart = new Chart(fpsCtx, {
+    type: 'line',
+    data: {
+        labels: [],
+        datasets: [{
+            label: 'FPS',
+            data: [],
+            borderColor: '#16a34a',
+            backgroundColor: 'rgba(22, 163, 74, 0.1)',
+            fill: true,
+            tension: 0.3,
+            pointRadius: 0,
+            borderWidth: 2,
+        }]
+    },
+    options: {
+        responsive: true, maintainAspectRatio: false,
+        scales: {
+            y: { beginAtZero: true, max: 40 },
+        },
+        plugins: { legend: { display: false } },
+        animation: false,
+    }
+});
+
+// ── Chart Races (doughnut) ──
+const racesCtx = $('chart-races').getContext('2d');
+const racesChart = new Chart(racesCtx, {
+    type: 'doughnut',
+    data: {
+        labels: [],
+        datasets: [{
+            data: [],
+            backgroundColor: [],
+            borderWidth: 0,
+        }]
+    },
+    options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: {
+                label: (ctx) => `${ctx.label}: ${ctx.raw} (${ctx.dataset.data[ctx.dataIndex]}%)`
+            }}
+        },
+        animation: false,
+    }
+});
+
+// ── Chart Activities (bar) ──
+const actCtx = $('chart-activities').getContext('2d');
+const actChart = new Chart(actCtx, {
+    type: 'bar',
+    data: {
+        labels: [],
+        datasets: [{
+            label: 'Occurrences',
+            data: [],
+            backgroundColor: '#3b82f6',
+            borderRadius: 4,
+        }]
+    },
+    options: {
+        responsive: true, maintainAspectRatio: false,
+        indexAxis: 'y',
+        plugins: { legend: { display: false } },
+        scales: { x: { beginAtZero: true } },
+        animation: false,
+    }
+});
+
+// ── Heatmap en Canvas natif ──
+const heatCanvas = $('heatmap');
+const heatCtx = heatCanvas.getContext('2d');
+function drawHeatmap(heatmapData) {
+    const size = heatmapData.grid_size;
+    const cells = heatmapData.global || [];
+    const total = heatmapData.total_samples || 1;
+    const cellPx = heatCanvas.width / size;
+
+    // Resize haute résolution pour écrans retina
+    const dpr = window.devicePixelRatio || 1;
+    heatCanvas.width = 400 * dpr;
+    heatCanvas.height = 400 * dpr;
+    heatCanvas.style.width = '400px';
+    heatCanvas.style.height = '400px';
+    heatCtx.scale(dpr, dpr);
+
+    // Fond
+    heatCtx.fillStyle = '#0f1410';
+    heatCtx.fillRect(0, 0, heatCanvas.width / dpr, heatCanvas.height / dpr);
+
+    // Cellules
+    let maxCount = 0;
+    cells.forEach(c => { if (c.count > maxCount) maxCount = c.count; });
+    if (maxCount === 0) maxCount = 1;
+
+    cells.forEach(c => {
+        const intensity = c.count / maxCount;
+        // Vert → Jaune → Rouge
+        let r, g, b;
+        if (intensity < 0.5) {
+            // vert (0.4) → ambre (0.6)
+            const t = intensity * 2;
+            r = Math.round(22 + (217 - 22) * t);
+            g = Math.round(163 + (119 - 163) * t);
+            b = Math.round(74 + (6 - 74) * t);
+        } else {
+            // ambre (0.5) → rouge (1.0)
+            const t = (intensity - 0.5) * 2;
+            r = Math.round(217 + (239 - 217) * t);
+            g = Math.round(119 + (68 - 119) * t);
+            b = Math.round(6 + (68 - 6) * t);
+        }
+        heatCtx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.3 + intensity * 0.7})`;
+        heatCtx.fillRect(c.x * cellPx, c.y * cellPx, cellPx, cellPx);
+    });
+
+    // Grille subtile
+    heatCtx.strokeStyle = 'rgba(255,255,255,0.05)';
+    heatCtx.lineWidth = 1;
+    for (let i = 0; i <= size; i++) {
+        heatCtx.beginPath();
+        heatCtx.moveTo(i * cellPx, 0);
+        heatCtx.lineTo(i * cellPx, 400);
+        heatCtx.stroke();
+        heatCtx.beginPath();
+        heatCtx.moveTo(0, i * cellPx);
+        heatCtx.lineTo(400, i * cellPx);
+        heatCtx.stroke();
+    }
+}
+
+// ── Timeline avec filtre ──
+let currentTimelineFilter = 'ALL';
+function fmtTime(t) {
+    const m = Math.floor(t / 60);
+    const s = Math.floor(t % 60);
+    return `${m}:${String(s).padStart(2, '0')}`;
+}
+function renderTimeline(events) {
+    const list = $('timeline-list');
+    const filtered = currentTimelineFilter === 'ALL'
+        ? events
+        : events.filter(e => e.type === currentTimelineFilter);
+    list.innerHTML = filtered.slice(-50).reverse().map(e => `
+        <li class="timeline-item t-${e.type.toLowerCase()}">
+            <span class="timeline-time">+${fmtTime(e.t)}</span>
+            <span class="timeline-type">${e.type}</span>
+            <span class="t-msg">${escapeHtml(e.msg)}</span>
+        </li>
+    `).join('') || '<li class="list-empty">Aucun evenement</li>';
+}
+
+document.querySelectorAll('.timeline-filter').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.timeline-filter').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentTimelineFilter = btn.dataset.type;
+        // refresh immediat
+        refreshDashboard();
+    });
+});
+
+// ── Refresh dashboard (3s, plus lent que les stats) ──
+async function refreshDashboard() {
+    try {
+        const [dResp, hResp] = await Promise.all([
+            fetch('/api/dashboard'),
+            fetch('/api/heatmap'),
+        ]);
+        const d = await dResp.json();
+        const h = await hResp.json();
+
+        // KPIs
+        $('kpi-unique').textContent = d.unique_animals ?? 0;
+        $('kpi-detections').textContent = d.detection_count ?? 0;
+        const recentFps = d.fps_history.slice(-10).map(p => p.fps);
+        const avgFps = recentFps.length
+            ? (recentFps.reduce((a, b) => a + b, 0) / recentFps.length).toFixed(1)
+            : '-';
+        $('kpi-fps').textContent = avgFps;
+        const up = d.uptime ?? 0;
+        $('kpi-uptime').textContent = up > 3600
+            ? `${Math.floor(up/3600)}h${Math.floor(up%3600/60)}m`
+            : `${Math.floor(up/60)}m${Math.floor(up%60)}s`;
+
+        // Chart FPS
+        fpsChart.data.labels = d.fps_history.map(p => fmtTime(p.t));
+        fpsChart.data.datasets[0].data = d.fps_history.map(p => p.fps);
+        fpsChart.update('none');
+
+        // Chart races (avec couleurs)
+        const races = d.race_counts;
+        racesChart.data.labels = Object.keys(races);
+        racesChart.data.datasets[0].data = Object.values(races);
+        racesChart.data.datasets[0].backgroundColor =
+            Object.keys(races).map(r => COAT_COLORS[r] || '#888');
+        racesChart.update('none');
+        // Legend custom
+        const total = Object.values(races).reduce((a, b) => a + b, 0) || 1;
+        $('races-legend').innerHTML = Object.entries(races).map(([r, c]) => `
+            <span class="legend-item">
+                <span class="legend-swatch" style="background:${COAT_COLORS[r] || '#888'}"></span>
+                ${escapeHtml(r)} (${Math.round(c/total*100)}%)
+            </span>
+        `).join('');
+
+        // Chart activities
+        const acts = d.activity_counts;
+        const actOrder = Object.entries(acts).sort((a, b) => b[1] - a[1]);
+        actChart.data.labels = actOrder.map(a => a[0]);
+        actChart.data.datasets[0].data = actOrder.map(a => a[1]);
+        actChart.update('none');
+
+        // Heatmap
+        drawHeatmap(h);
+
+        // Timeline
+        renderTimeline(d.timeline_events || []);
+    } catch (e) {
+        console.error('dashboard refresh error:', e);
+    }
+}
+setInterval(() => { if (dashPanel.classList.contains('open')) refreshDashboard(); }, 3000);

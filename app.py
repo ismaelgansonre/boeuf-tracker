@@ -451,6 +451,26 @@ def list_animals():
     })
 
 
+@app.route("/api/dashboard")
+def dashboard():
+    """Donnees agregees pour le dashboard (FPS, races, comportements, etc.)."""
+    from analytics import get as get_analytics
+    collector = get_analytics()
+    if collector is None:
+        return jsonify({"ok": False, "error": "analytics non initialise"}), 503
+    return jsonify(collector.get_dashboard())
+
+
+@app.route("/api/heatmap")
+def heatmap():
+    """Grille de positions pour la heatmap spatiale (par robe-type)."""
+    from analytics import get as get_analytics
+    collector = get_analytics()
+    if collector is None:
+        return jsonify({"ok": False, "error": "analytics non initialise"}), 503
+    return jsonify(collector.get_heatmap())
+
+
 @app.route("/api/bench", methods=["GET"])
 def bench_fps():
     """

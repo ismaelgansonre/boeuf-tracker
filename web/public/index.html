@@ -6,6 +6,7 @@
     <title>🐄 Boeuf Tracker</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐄</text></svg>">
     <link rel="stylesheet" href="/styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script>
         // Applique le thème AVANT le render (pas de flash)
         const saved = localStorage.getItem('theme') || 'dark';
@@ -29,6 +30,7 @@
             <span id="meta-pending" class="meta-pending" style="display:none"></span>
         </div>
         <button id="btn-theme" class="btn-icon" title="Basculer thème">🌙</button>
+        <button id="btn-dashboard" class="btn-icon" title="Ouvrir le dashboard">Analytics</button>
     </header>
 
     <!-- Source bar -->
@@ -158,6 +160,86 @@
             </div>
         </aside>
     </main>
+
+    <!-- Panneau Dashboard (slide-in) -->
+    <aside id="dashboard-panel" class="dashboard-panel">
+        <div class="dashboard-header">
+            <h2>Dashboard Analytics</h2>
+            <button id="btn-dashboard-close" class="btn-icon">×</button>
+        </div>
+        <div class="dashboard-content">
+            <!-- KPIs -->
+            <div class="kpi-grid">
+                <div class="kpi-card">
+                    <div class="kpi-label">Animaux uniques</div>
+                    <div class="kpi-value" id="kpi-unique">-</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Detections</div>
+                    <div class="kpi-value" id="kpi-detections">-</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">FPS moyen</div>
+                    <div class="kpi-value" id="kpi-fps">-</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Uptime</div>
+                    <div class="kpi-value" id="kpi-uptime">-</div>
+                </div>
+            </div>
+
+            <!-- FPS history -->
+            <div class="card dashboard-card">
+                <h3 class="card-title">FPS en temps reel (10min)</h3>
+                <div class="chart-container"><canvas id="chart-fps"></canvas></div>
+            </div>
+
+            <!-- Repartition races -->
+            <div class="card dashboard-card">
+                <h3 class="card-title">Repartition par robe</h3>
+                <div class="chart-container"><canvas id="chart-races"></canvas></div>
+                <div id="races-legend" class="races-legend"></div>
+            </div>
+
+            <!-- Comportements -->
+            <div class="card dashboard-card">
+                <h3 class="card-title">Activites detectees</h3>
+                <div class="chart-container"><canvas id="chart-activities"></canvas></div>
+            </div>
+
+            <!-- Heatmap spatiale -->
+            <div class="card dashboard-card">
+                <h3 class="card-title">Heatmap spatiale (positions des animaux)</h3>
+                <p class="card-subtitle">
+                    Grille 20x20 normalisee (0 = coin haut-gauche, 1 = coin bas-droit).
+                    Plus un point est chaud, plus les bovins s'y sont arretes.
+                </p>
+                <div class="heatmap-wrapper">
+                    <canvas id="heatmap" width="400" height="400"></canvas>
+                    <div class="heatmap-legend">
+                        <div class="heatmap-legend-bar"></div>
+                        <div class="heatmap-legend-labels">
+                            <span>0</span><span>50</span><span>100+</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Timeline -->
+            <div class="card dashboard-card">
+                <h3 class="card-title">Timeline des evenements</h3>
+                <p class="card-subtitle">Filtrer par type :</p>
+                <div class="timeline-filters">
+                    <button class="timeline-filter active" data-type="ALL">Tous</button>
+                    <button class="timeline-filter" data-type="NEW">NEW</button>
+                    <button class="timeline-filter" data-type="MATCH">MATCH</button>
+                    <button class="timeline-filter" data-type="CRASH">CRASH</button>
+                    <button class="timeline-filter" data-type="INFO">INFO</button>
+                </div>
+                <ul id="timeline-list" class="timeline-list"></ul>
+            </div>
+        </div>
+    </aside>
 
     <!-- Modal reset DB -->
     <dialog id="modal-reset" class="modal">

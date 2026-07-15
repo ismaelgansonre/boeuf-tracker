@@ -88,6 +88,7 @@ from database import EmbeddingDatabase
 from reid_worker import ReIDWorker
 from breed import classify_breed
 from names import make_name_generator
+from analytics import init as init_analytics, get as get_analytics, DetectionSample
 from state import STATE, color_for_name, reset_for_new_source
 from capture import open_capture, source_label
 
@@ -314,6 +315,9 @@ def detection_loop(args):
     name_gen = make_name_generator(db)
     ok(f"[Names] {len(name_gen.all())} noms attribues à partir de la DB")
     STATE["name_gen"] = name_gen
+    # Analytics : accumule FPS, races, positions pour le dashboard
+    analytics = init_analytics(lambda: STATE)
+    ok(f"[Analytics] Collecteur démarré (sampling 2s, dashboard + heatmap)")
 
     # Validation compatibilité dim
     dummy_crop = np.zeros((128, 128, 3), dtype=np.uint8)
@@ -730,6 +734,33 @@ def detection_loop(args):
                             "breed": breed_name,
                             "breed_confidence": round(float(breed_conf), 2) if breed_conf else 0,
                         })
+
+                        # Pousse la position (normalisee 0-1) vers le collecteur
+                        # analytics pour la heatmap. Non-bloquant, decimation
+                        # interne au collector si >5000 samples.
+                        if name != "?":
+                            fh, fw = frame.shape[:2]
+                            cx_norm = (x1 + x2) / 2.0 / max(fw, 1)
+                            cy_norm = (y1 + y2) / 2.0 / max(fh, 1)
+                            # Behavior lookup
+                            behavior_now = "active"
+                            for b in STATE.get("behavior", []):
+                                if b.get("track_id") == int(tid):
+                                    behavior_now = b.get("action", "active")
+                                    break
+                            try:
+                                analytics.push_detection(DetectionSample(
+                                    frame=frame_idx,
+                                    proper_name=display_name,
+                                    key=name,
+                                    breed=breed_name,
+                                    conf=float(conf),
+                                    cx_norm=cx_norm,
+                                    cy_norm=cy_norm,
+                                    behavior=behavior_now,
+                                ))
+                            except Exception:
+                                pass
 
                     # Comportement (sur la dernière frame traitée)
                     STATE["behavior"] = analyze_behavior(boxes, track_ids, time.time(), frame.shape)
