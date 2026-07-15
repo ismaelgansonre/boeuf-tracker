@@ -340,11 +340,12 @@ def detection_loop(args):
     try:
         engine = get_clip_engine()
         if engine is not None:
-            ok(f"[Breed] CLIP zero-shot pret ({len(engine.race_names)} races)")
+            kind = getattr(engine, "_kind", "vlm").upper()
+            ok(f"[Breed] {kind} zero-shot pret ({len(engine.race_names)} races)")
         else:
-            warn("[Breed] CLIP indisponible, fallback HSV active")
+            warn("[Breed] modele vision-langage indisponible, fallback HSV active")
     except Exception as e:
-        warn(f"[Breed] Pre-charge CLIP echoue ({e}), fallback HSV")
+        warn(f"[Breed] pre-charge modele echoue ({e}), fallback HSV")
 
     # Validation compatibilité dim
     dummy_crop = np.zeros((128, 128, 3), dtype=np.uint8)

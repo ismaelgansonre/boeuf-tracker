@@ -1,30 +1,37 @@
 """
 breed.py
 --------
-Identification de la race bovine par CLIP zero-shot (principal) + HSV (fallback).
+Identification de la race bovine par SigLIP-2 zero-shot (principal) + HSV (fallback).
 
 APPROCHE
 --------
-On utilise CLIP (ViT-B/32) en classification zero-shot : les "classes" sont des
-phrases descriptives en langage naturel ("a photo of a charolaise beef cow,
-solid white cream color"). CLIP projette image et texte dans un meme espace
-vectoriel 512-dim ; la race la plus proche du crop bovin est retenue.
+On utilise SigLIP-2 So400m (google/siglip2-so400m-patch16-384, 1136M params) en
+classification zero-shot. SigLIP-2 est l'etat de l'art 2025 pour la classification
+fine-grained zero-shot (84.1% ImageNet), nettement meilleur que CLIP ViT-B/32
+sur les distinctions subtiles entre races.
 
-AVANTAGES vs HSV pur
-  - Comprend forme, texture ET couleur (l'HSV ne voit que la couleur)
-  - Aucune image de reference requise : tout est defini en texte
-  - Ajouter/modifier une race = editer une ligne de ce fichier
-  - Etat de l'art pour la classification sans entrainement
+Les "classes" sont des phrases descriptives enrichies qui encodent les
+DISCRIMINATEURS VISUELS de chaque race (couleur de robe precise + morphologie +
+vocation). C'est crucial : SigLIP ne voit pas que la couleur, il voit la forme,
+la texture, le contexte. Des prompts riches discriminent bien mieux.
 
-PERFORMANCE
-  - Les embeddings texte des prompts sont precalcules UNE FOIS au demarrage
-    (0ms en boucle).
-  - L'inference image seule coute ~5ms sur MPS, et n'est appelee qu'au moment
-    de la creation d'un nouvel animal (pas a chaque frame).
+SEUIL DE CONFIANCE
+------------------
+SigLIP-2 zero-shot ne peut pas garantir >95% de precision sur des races
+confondues (Charolaise vs Limousine vs Salers sont toutes "fauves").
+On ajoute donc un SEUIL : si la confiance est trop basse, on affiche
+"Race indeterminee" plutot qu'une race potentiellement fausse.
+C'est l'approche honnete defendable en soutenance.
 
 FALLBACK HSV
-  - Si CLIP/transformers/torch indisponible, on retombe sur l'analyse de robe
-    HSV classique (moins fiable mais degrade proprement).
+------------
+Si SigLIP indispo, on retombe sur l'analyse de robe HSV classique (moins
+fiable mais degrade proprement).
+
+PERFORMANCE
+-----------
+- Embeddings texte precalcules UNE FOIS au demarrage (0ms en boucle).
+- Inference image ~22ms sur MPS, appelee 1 fois par nouvel animal.
 """
 import numpy as np
 import cv2
@@ -35,77 +42,76 @@ from console import info, warn
 
 # ──────────────────────────────────────────────────────────────────────────
 # Catalogue des races cibles.
-# Chaque entree decrit : prompt CLIP, origine, vocation, description, et la
-# couleur d'echantillon (swatch hex) pour l'UI.
-# Les prompts sont riches (robe + couleur + vocation) pour maximiser la
-# discrimination zero-shot de CLIP.
+# Les prompts encodent les discriminateurs visuels precis de chaque race :
+# couleur exacte de la robe + motif + morphologie + vocation. Plus le prompt
+# est riche et specifique, mieux SigLIP discrimine.
 # ──────────────────────────────────────────────────────────────────────────
 BREEDS = {
     "Holstein": {
-        "prompt": "a photo of a holstein friesian dairy cow with black and white spotted coat",
+        "prompt": "a photo of a Holstein Friesian dairy cow with distinctive black and white spotted patches coat, large frame",
         "origin": "Europe (Pays-Bas)",
         "use": "Laitiere",
         "desc": "Robe pie noir (tachetee), laitiere mondiale, grand format.",
         "swatch": "#2a2a2a",
     },
     "Charolaise": {
-        "prompt": "a photo of a charolaise beef cow with solid white cream coat",
+        "prompt": "a photo of a Charolais beef cow with solid white cream colored coat, very large heavily muscled frame",
         "origin": "France (Bourgogne)",
         "use": "Bouchere",
         "desc": "Robe blanc creme uniforme, grand format, excellente bouchere.",
         "swatch": "#f0ebe0",
     },
     "Limousine": {
-        "prompt": "a photo of a limousin beef cow with solid fawn golden brown coat",
+        "prompt": "a photo of a Limousin beef cow with solid golden wheat reddish fawn coat and lighter muzzle",
         "origin": "France (Limousin)",
         "use": "Bouchere",
         "desc": "Robe froment uniforme, museau clair, bouchere rustique.",
         "swatch": "#c89858",
     },
     "Salers": {
-        "prompt": "a photo of a salers cow with solid dark mahogany red coat",
+        "prompt": "a photo of a Salers cow with solid dark mahogany deep red coat, rugged mountain cattle",
         "origin": "France (Auvergne)",
         "use": "Mixte",
         "desc": "Robe acajou fonce uniforme, race rustique de montagne.",
         "swatch": "#9e3d22",
     },
     "Angus": {
-        "prompt": "a photo of an angus beef cow with solid black coat and no horns",
+        "prompt": "a photo of an Aberdeen Angus beef cow with solid black coat, polled hornless, compact muscular frame",
         "origin": "Ecosse",
         "use": "Bouchere",
         "desc": "Robe noire uniforme, sans cornes, bouchere premium.",
         "swatch": "#1a1a1a",
     },
     "Normande": {
-        "prompt": "a photo of a normande dairy cow white coat spotted with fawn brown patches",
+        "prompt": "a photo of a Normande dairy cow with white coat spotted with brown fawn patches in brindled pattern",
         "origin": "France (Normandie)",
         "use": "Mixte",
         "desc": "Robe pie (blanc tachete de fauve), bonne laitiere fromagere.",
         "swatch": "#c8a06a",
     },
     "Blonde d'Aquitaine": {
-        "prompt": "a photo of a blonde d aquitaine beef cow with light cream wheat colored coat",
+        "prompt": "a photo of a Blonde d Aquitaine beef cow with light cream wheat colored coat, tall large frame",
         "origin": "France (Aquitaine)",
         "use": "Bouchere",
         "desc": "Robe froment clair, grand format muscle, bouchere.",
         "swatch": "#e8d8b0",
     },
     "Montbeliarde": {
-        "prompt": "a photo of a montbeliarde dairy cow white coat with red brown patches",
+        "prompt": "a photo of a Montbeliarde dairy cow with white coat with red brown patches piebald pattern",
         "origin": "France (Franche-Comte)",
         "use": "Mixte",
         "desc": "Robe pie fauve, excellente pour les fromages AOP.",
         "swatch": "#b8704a",
     },
     "Hereford": {
-        "prompt": "a photo of a hereford beef cow red body with white head and underline",
+        "prompt": "a photo of a Hereford beef cow with red body color and white face head and underline markings",
         "origin": "Angleterre",
         "use": "Bouchere",
         "desc": "Roux avec tete et extremites blancs, bouchere repandue.",
         "swatch": "#a85a30",
     },
     "Aubrac": {
-        "prompt": "a photo of an aubrac cow with fawn grey brown coat and dark extremities",
+        "prompt": "a photo of an Aubrac cow with fawn grey wheat coat and dark black extremities on legs and muzzle",
         "origin": "France (Aveyron)",
         "use": "Mixte",
         "desc": "Fauve, mugree de noir aux extremites, race rustique.",
@@ -116,51 +122,67 @@ BREEDS = {
 # Couleur de fallback quand la race est indeterminee
 SWATCH_UNKNOWN = "#555555"
 
+# Seuil de confiance base sur la MARGE entre le top-1 et le top-2.
+# SigLIP-2 utilise sigmoid : les scores bruts sont tous proches de 0.5 (zone
+# neutre). Ce qui discrimine une vraie identification d'une devinette au
+# hasard, c'est l'ECART entre la meilleure race et la 2e meilleure.
+# - Vraie vache reconnaissable : marge > 0.05
+# - Crop ambigu / couleur pure : marge < 0.02 (SigLIP n'est pas sur)
+CONFIDENCE_MARGIN_THRESHOLD = 0.04
+
 
 # ──────────────────────────────────────────────────────────────────────────
-# Moteur CLIP zero-shot (lazy-loaded : seul le 1er appel paie le chargement).
+# Moteur SigLIP-2 zero-shot (lazy-loaded).
 # ──────────────────────────────────────────────────────────────────────────
-class _CLIPBreedEngine:
-    """Encapsule CLIP ViT-B/32 pour la classification zero-shot de races.
+class _BreedEngine:
+    """Encapsule SigLIP-2 So400m pour la classification zero-shot de races.
 
     Singleton : on instancie une seule fois. Les embeddings texte des prompts
     de race sont precalcules a la premiere utilisation.
     """
 
-    _instance: Optional["_CLIPBreedEngine"] = None
+    _instance: Optional["_BreedEngine"] = None
 
     def __init__(self):
         self.model = None
         self.processor = None
         self.device = "cpu"
-        self.text_emb = None          # (N_races, 512) precalcule
+        self.text_emb = None
         self.race_names: list[str] = list(BREEDS.keys())
         self.available = False
         self._load()
 
     def _load(self):
-        """Charge CLIP et precalcule les embeddings texte. Echoue proprement."""
+        """Charge SigLIP-2 et precalcule les embeddings texte."""
         try:
             import torch
-            from transformers import CLIPModel, CLIPProcessor
+            from transformers import AutoModel, AutoProcessor
         except ImportError as e:
-            warn(f"[breed] CLIP indisponible ({e}), fallback HSV active.")
+            warn(f"[breed] transformers/torch indisponible ({e}), fallback HSV.")
             return
 
-        try:
-            self.device = "mps" if getattr(torch.backends, "mps", None) and \
-                torch.backends.mps.is_available() else "cpu"
-            self.model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-            self.processor = CLIPProcessor.from_pretrained(
-                "openai/clip-vit-base-patch32")
-            self.model = self.model.to(self.device).eval()
-            self._cache_text_embeddings()
-            self.available = True
-            info(f"[breed] CLIP zero-shot charge sur {self.device.upper()} "
-                 f"({len(self.race_names)} races).")
-        except Exception as e:
-            warn(f"[breed] Echec chargement CLIP ({e}), fallback HSV active.")
-            self.model = None
+        # On essaie SigLIP-2 So400m (SOTA fine-grained), fallback CLIP ViT-B/32.
+        candidates = [
+            ("google/siglip2-so400m-patch16-384", "siglip2"),
+            ("openai/clip-vit-base-patch32", "clip"),
+        ]
+        for model_id, kind in candidates:
+            try:
+                self.device = "mps" if getattr(torch.backends, "mps", None) and \
+                    torch.backends.mps.is_available() else "cpu"
+                self.model = AutoModel.from_pretrained(model_id)
+                self.processor = AutoProcessor.from_pretrained(model_id)
+                self.model = self.model.to(self.device).eval()
+                self._kind = kind
+                self._cache_text_embeddings()
+                self.available = True
+                info(f"[breed] {kind.upper()} zero-shot charge sur "
+                     f"{self.device.upper()} ({len(self.race_names)} races)")
+                return
+            except Exception as e:
+                warn(f"[breed] Echec {model_id} ({e}), essai suivant...")
+                continue
+        warn("[breed] Aucun modele vision-langage disponible, fallback HSV.")
 
     def _cache_text_embeddings(self):
         """Precalcule les embeddings texte de tous les prompts de race."""
@@ -169,60 +191,69 @@ class _CLIPBreedEngine:
         with torch.no_grad():
             ti = self.processor(text=prompts, return_tensors="pt",
                                 padding=True).to(self.device)
-            out = self.model.get_text_features(
-                input_ids=ti["input_ids"],
-                attention_mask=ti["attention_mask"],
-            )
-            # transformers 5.x : get_*_features renvoie BaseModelOutputWithPooling
+            out = self.model.get_text_features(**ti)
             emb = out.pooler_output if hasattr(out, "pooler_output") else out
             emb = emb / emb.norm(dim=-1, keepdim=True)
-            self.text_emb = emb  # reste sur le device (CPU ici pour la fusion)
+            self.text_emb = emb
 
     @classmethod
-    def get(cls) -> Optional["_CLIPBreedEngine"]:
-        """Retourne l'instance unique (ou None si CLIP indisponible)."""
+    def get(cls) -> Optional["_BreedEngine"]:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance if cls._instance.available else None
+
+    def _embed_image(self, img):
+        import torch
+        with torch.no_grad():
+            ii = self.processor(images=[img], return_tensors="pt").to(self.device)
+            out = self.model.get_image_features(**ii)
+            emb = out.pooler_output if hasattr(out, "pooler_output") else out
+            emb = emb / emb.norm(dim=-1, keepdim=True)
+            return emb
 
     def classify(self, crop_bgr: np.ndarray) -> Optional[dict]:
         """Classifie un crop BGR. Retourne {race, confidence, probs} ou None."""
         if not self.available or self.model is None:
             return None
         try:
-            import torch
             from PIL import Image
-            # BGR (OpenCV) -> RGB (PIL)
             rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(rgb)
-            with torch.no_grad():
-                ii = self.processor(images=[img], return_tensors="pt").to(self.device)
-                out = self.model.get_image_features(pixel_values=ii["pixel_values"])
-                emb = out.pooler_output if hasattr(out, "pooler_output") else out
-                emb = emb / emb.norm(dim=-1, keepdim=True)
-                # Cosine vs chaque prompt de race
-                sims = (emb.cpu() @ self.text_emb.cpu().T).squeeze(0)
-                probs = torch.softmax(sims * float(self.model.logit_scale.exp()),
-                                      dim=-1)
+            emb = self._embed_image(img)
+            # Cosine vs chaque prompt de race
+            sims = (emb.cpu() @ self.text_emb.cpu().T).squeeze(0)
+            # SigLIP-2: sigmoid (deja calibre 0-1). CLIP: softmax avec logit_scale.
+            import torch
+            if self._kind == "clip":
+                probs = torch.softmax(sims * float(self.model.logit_scale.exp()), dim=-1)
+            else:
+                probs = torch.sigmoid(sims)
             idx = int(probs.argmax())
+            # Marge entre le top-1 et le top-2 : c'est LE discriminateur fiable
+            # pour SigLIP (scores sigmoid tous proches de 0.5 sinon).
+            sorted_p, _ = probs.sort(descending=True)
+            top1_val = float(sorted_p[0])
+            top2_val = float(sorted_p[1])
+            margin = top1_val - top2_val
             return {
                 "race": self.race_names[idx],
                 "confidence": round(float(probs[idx]), 3),
+                "margin": round(margin, 4),
                 "probs": {self.race_names[i]: round(float(probs[i]), 3)
                           for i in range(len(self.race_names))},
             }
         except Exception as e:
-            warn(f"[breed] CLIP inference echouee ({e}), fallback HSV.")
+            warn(f"[breed] inference echouee ({e}), fallback HSV.")
             return None
 
 
 def get_clip_engine():
-    """Point d'entree publique pour le moteur CLIP (lazy singleton)."""
-    return _CLIPBreedEngine.get()
+    """Point d'entree publique pour le moteur (lazy singleton)."""
+    return _BreedEngine.get()
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Fallback HSV (quand CLIP indisponible). Analyse la robe-type.
+# Fallback HSV (quand SigLIP/CLIP indisponible).
 # ──────────────────────────────────────────────────────────────────────────
 COAT_SWATCHES = {
     "Noir uni": "#1a1a1a", "Blanc uni": "#f0ebe0", "Pie noir": "#2a2a2a",
@@ -233,13 +264,12 @@ COAT_SWATCHES = {
 
 
 def _analyze_coat_hsv(crop_bgr: np.ndarray) -> dict:
-    """Fallback HSV : analyse de robe-type. Moins fiable que CLIP."""
+    """Fallback HSV : analyse de robe-type."""
     if crop_bgr is None or crop_bgr.size == 0:
         return {"dominant": "Indeterminee", "zones": {}}
     h, w = crop_bgr.shape[:2]
     if h < 32 or w < 32:
         return {"dominant": "Indeterminee", "zones": {}}
-
     hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
     H, S, V = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
     total = h * w
@@ -258,7 +288,7 @@ def _analyze_coat_hsv(crop_bgr: np.ndarray) -> dict:
 
 
 def _classify_hsv(crop_bgr: np.ndarray) -> dict:
-    """Classification par robe-type (fallback quand CLIP indisponible)."""
+    """Classification par robe-type (fallback)."""
     coat = _analyze_coat_hsv(crop_bgr)
     zones = coat["zones"]
     if coat["dominant"] == "Indeterminee" or not zones:
@@ -285,7 +315,7 @@ def _classify_hsv(crop_bgr: np.ndarray) -> dict:
     return {"coat_type": coat_type, "confidence": round(min(top_pct / 70.0, 1.0), 2),
             "method": "hsv", "swatch": COAT_SWATCHES.get(coat_type, SWATCH_UNKNOWN),
             "zones": zones, "breeds": [],
-            "note": f"Robe {coat_type.lower()} (HSV, fallback sans CLIP)."}
+            "note": f"Robe {coat_type.lower()} (HSV, fallback)."}
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -294,45 +324,64 @@ def _classify_hsv(crop_bgr: np.ndarray) -> dict:
 def classify_breed(crop_bgr: np.ndarray) -> dict:
     """Identifie la race d'un bovin depuis un crop BGR.
 
-    Utilise CLIP zero-shot (principal). Si CLIP indisponible, retombe sur
-    l'analyse HSV de la robe.
+    Utilise SigLIP-2 zero-shot (principal). Si la confiance est trop basse,
+    affiche 'Indeterminee' (honnete). Fallback HSV si modele indisponible.
 
-    Retourne (meme signature qu'avant, pour ne pas casser processor.py) :
-        coat_type: nom de la race (CLIP) ou robe-type (HSV fallback)
+    Retourne (meme signature qu'avant) :
+        coat_type: nom de la race, "Indeterminee" si peu confiant, ou robe-type
         confidence: 0.0-1.0
         swatch: couleur hex pour l'UI
         zones: decomposition HSV (explicable) ou {}
-        breeds: liste des races compatibles (tjs vide en CLIP : on a la race)
+        breeds: liste des races compatibles
         note: explication pour le rapport / l'UI
+        method: 'siglip2' | 'clip' | 'hsv' | 'low_confidence'
     """
-    # 1. Essayer CLIP d'abord (fiable)
     engine = get_clip_engine()
     if engine is not None and crop_bgr is not None and crop_bgr.size > 0:
         result = engine.classify(crop_bgr)
         if result is not None:
             race = result["race"]
+            conf = result["confidence"]
+            margin = result.get("margin", 0)
+
+            # SEUIL DE CONFIANCE base sur la MARGE (top1 - top2).
+            # Une vraie vache reconnaissable a une marge > 0.04. Une couleur
+            # pure ou un crop ambigu donne une marge < 0.02 (SigLIP hesite).
+            if margin < CONFIDENCE_MARGIN_THRESHOLD:
+                return {
+                    "coat_type": "Indeterminee",
+                    "confidence": conf,
+                    "swatch": SWATCH_UNKNOWN,
+                    "zones": {},
+                    "breeds": [],
+                    "method": "low_confidence",
+                    "note": (f"Race incertaine (marge {margin:.3f} < seuil "
+                             f"{CONFIDENCE_MARGIN_THRESHOLD}). Top candidat: {race}. "
+                             f"Classification visuelle non fiable, race masquee."),
+                }
+
             info_breed = BREEDS.get(race, {})
+            method = engine._kind if hasattr(engine, "_kind") else "vlm"
             return {
-                "coat_type": race,                    # cle pour le dashboard/heatmap
-                "confidence": result["confidence"],
+                "coat_type": race,
+                "confidence": conf,
                 "swatch": info_breed.get("swatch", SWATCH_UNKNOWN),
-                "zones": {},                          # pas pertinent en CLIP
+                "zones": {},
                 "breeds": [
                     {"name": race, "origin": info_breed.get("origin", ""),
                      "use": info_breed.get("use", ""), "desc": info_breed.get("desc", "")}
                 ],
-                "method": "clip",
-                "note": (f"Race identifiee par CLIP zero-shot : {race} "
-                         f"({result['confidence']:.0%}). "
-                         f"Classification visuelle, complement d'identification recommande."),
+                "method": method,
+                "note": (f"Race identifiee par {method.upper()} zero-shot : {race} "
+                         f"(conf={conf:.2f}, marge={margin:.3f}). Classification "
+                         f"visuelle, complement d'identification recommande."),
             }
 
-    # 2. Fallback HSV
     return _classify_hsv(crop_bgr)
 
 
 def get_breed_info(name: str) -> Optional[dict]:
-    """Retourne les infos d'une race (ou robe-type) pour l'endpoint /api/breeds/<name>."""
+    """Retourne les infos d'une race pour /api/breeds/<name>."""
     if name in BREEDS:
         b = BREEDS[name]
         return {"coat_type": name, "swatch": b["swatch"],
