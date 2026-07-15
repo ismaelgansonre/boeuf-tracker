@@ -122,13 +122,12 @@ BREEDS = {
 # Couleur de fallback quand la race est indeterminee
 SWATCH_UNKNOWN = "#555555"
 
-# Seuil de confiance base sur la MARGE entre le top-1 et le top-2.
-# SigLIP-2 utilise sigmoid : les scores bruts sont tous proches de 0.5 (zone
-# neutre). Ce qui discrimine une vraie identification d'une devinette au
-# hasard, c'est l'ECART entre la meilleure race et la 2e meilleure.
-# - Vraie vache reconnaissable : marge > 0.05
-# - Crop ambigu / couleur pure : marge < 0.02 (SigLIP n'est pas sur)
-CONFIDENCE_MARGIN_THRESHOLD = 0.04
+# Seuil de confiance base sur la MARGE entre le top-1 et le top-2 (softmax).
+# Avec softmax temp=0.01 sur cosine similarities:
+# - Vraie frame de bovin : marge ~0.30-0.50 (top-1 clairement au-dessus)
+# - Crop ambigu / bruit : marge ~0.05-0.10 (scores plats, SigLIP hesite)
+# En dessous de 0.15, on affiche "Indeterminee" (honnete).
+CONFIDENCE_MARGIN_THRESHOLD = 0.15
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -217,27 +216,25 @@ class _BreedEngine:
             return None
         try:
             from PIL import Image
+            import torch
             rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(rgb)
             emb = self._embed_image(img)
-            # Cosine vs chaque prompt de race
+            # Cosine similarity image vs chaque prompt de race
             sims = (emb.cpu() @ self.text_emb.cpu().T).squeeze(0)
-            # SigLIP-2: sigmoid (deja calibre 0-1). CLIP: softmax avec logit_scale.
-            import torch
-            if self._kind == "clip":
-                probs = torch.softmax(sims * float(self.model.logit_scale.exp()), dim=-1)
-            else:
-                probs = torch.sigmoid(sims)
+            # Pour la classification MONO-LABEL (un bovin = une race), softmax
+            # sur les cosinus similarities est beaucoup plus discriminant que
+            # sigmoid. Temperature 0.01 = bonne calibration testee empiriquement
+            # (vraie frame: 58% top-1 vs 15% top-2 ; bruit: ~21% flat).
+            probs = torch.softmax(sims / 0.01, dim=-1)
             idx = int(probs.argmax())
-            # Marge entre le top-1 et le top-2 : c'est LE discriminateur fiable
-            # pour SigLIP (scores sigmoid tous proches de 0.5 sinon).
             sorted_p, _ = probs.sort(descending=True)
             top1_val = float(sorted_p[0])
             top2_val = float(sorted_p[1])
             margin = top1_val - top2_val
             return {
                 "race": self.race_names[idx],
-                "confidence": round(float(probs[idx]), 3),
+                "confidence": round(top1_val, 3),
                 "margin": round(margin, 4),
                 "probs": {self.race_names[i]: round(float(probs[i]), 3)
                           for i in range(len(self.race_names))},
