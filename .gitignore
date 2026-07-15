@@ -27,3 +27,12 @@ data/
 *.swp
 .DS_Store
 uploads/
+
+# ZCode CLI cache
+.zcode/
+
+# Bun / Node
+web/node_modules/
+web/bun.lock
+web/data/
+web/dist/
