@@ -8,14 +8,23 @@ Stratégie de stabilité cross-session :
      Boeuf_002, ...). Cette cle est elle-meme stable grace à l'embedding
      Re-ID.
   2. Le mappage "Boeuf_NNN → Nom" est calcule PAR ORDRE DE CREATION : le 1er
-     bovin enregistre = 1er nom du pool, le 2e = 2e nom, etc.
+     bovin enregistre recoit le 1er nom du pool, le 2e = 2e nom, etc.
   3. Au prochain chargement, on relit la DB, on ordonne les bovins par
      first_seen, et on re-mappe les memes noms. Le bovin "Boeuf_003"
      d'aujourd'hui aura TOUJOURS le meme nom la prochaine fois.
 
+NOMS JAMAIS REUTILISES :
+  On maintient un COMPTEUR GLOBAL persistant (names_counter.json) qui ne
+  fait qu'augmenter, meme si la DB est reset. Ainsi, un bovin vu apres un
+  reset de DB ne recevra JAMAIS un nom deja utilise. Le 1er bovin de la
+  1ere video = Marguerite ; le 1er bovin de la 2e video (apres reset) =
+  le nom SUIVANT dans le pool, jamais Marguerite.
+
 Pool de noms : melange europeen + africain (~100), equilibre 50/50.
 Pas d'emojis (compat terminal/unix).
 """
+import json
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -53,6 +62,78 @@ NAME_POOL = [
     "Neptune", "Onyx", "Perle", "Quartz", "Rubis",
     "Saphir", "Topaze", "Umbra", "Vega", "Whisky",
 ]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Compteur global persistant. Garantit que chaque bovin JAMAIS vu recoit un
+# nom unique, meme apres un reset de la DB. Le compteur ne fait qu'augmenter.
+# ──────────────────────────────────────────────────────────────────────────
+COUNTER_PATH = "names_counter.json"
+
+
+class GlobalCounter:
+    """Compteur persistant pour la creation de nouvelles cles (Boeuf_NNN).
+
+    Survit aux resets de DB : si on purge cattle_db.pkl, le compteur garde
+    sa valeur. Le prochain bovin sera Boeuf_042 (par ex), jamais Boeuf_001.
+    """
+
+    def __init__(self, path: str = COUNTER_PATH):
+        self.path = path
+        self.value = self._load()
+
+    def _load(self) -> int:
+        if os.path.exists(self.path):
+            try:
+                with open(self.path) as f:
+                    return int(json.load(f).get("counter", 0))
+            except Exception:
+                return 0
+        return 0
+
+    def _save(self) -> None:
+        try:
+            with open(self.path, "w") as f:
+                json.dump({"counter": self.value}, f)
+        except Exception:
+            pass
+
+    def next(self) -> int:
+        """Incremente et retourne le prochain numero de bovin."""
+        self.value += 1
+        self._save()
+        return self.value
+
+    def peek(self) -> int:
+        """Retourne le numero du dernier bovin cree (sans incrementer)."""
+        return self.value
+
+    def reset(self) -> None:
+        """Remet le compteur a zero (reset explicite uniquement)."""
+        self.value = 0
+        self._save()
+
+
+# Singleton global (charge une fois au demarrage)
+_global_counter: Optional[GlobalCounter] = None
+
+
+def get_counter() -> GlobalCounter:
+    """Retourne le compteur global (singleton)."""
+    global _global_counter
+    if _global_counter is None:
+        _global_counter = GlobalCounter()
+    return _global_counter
+
+
+def next_bovin_key() -> str:
+    """Genere la prochaine cle unique pour un nouveau bovin.
+
+    Garantit l'unicite meme apres reset de DB :
+      Boeuf_001, Boeuf_002, ... Boeuf_042, [reset DB], Boeuf_043, ...
+    """
+    n = get_counter().next()
+    return f"Boeuf_{n:03d}"
 
 
 class NameGenerator:

@@ -15,6 +15,7 @@ env/
 *.onnx
 *.pkl
 *.npz
+names_counter.json
 
 # Media outputs
 screenshot_*.jpg

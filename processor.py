@@ -87,6 +87,7 @@ from reid import CattleReID
 from database import EmbeddingDatabase
 from reid_worker import ReIDWorker
 from breed import classify_breed, get_clip_engine
+from names import next_bovin_key, get_counter
 from names import make_name_generator
 from analytics import init as init_analytics, get as get_analytics, DetectionSample
 from state import STATE, color_for_name, reset_for_new_source
@@ -307,6 +308,21 @@ def detection_loop(args):
         detector = CattleDetector(model_name=args.yolo_model, device=device)
     reid = CattleReID(model_name=args.dino_model, device=reid_device)
     db = EmbeddingDatabase(path=args.db, reid_engine=reid)
+    # Synchronise le compteur global avec la DB existante : si la DB contient
+    # Boeuf_012 mais le compteur est a 0, on remonte le compteur a 12 pour
+    # garantir que le prochain bovin sera Boeuf_013 (jamais de doublon).
+    counter = get_counter()
+    max_key_num = 0
+    for key in db.animals:
+        if key.startswith("Boeuf_"):
+            try:
+                max_key_num = max(max_key_num, int(key.split("_")[1]))
+            except (ValueError, IndexError):
+                pass
+    if counter.peek() < max_key_num:
+        counter.value = max_key_num
+        counter._save()
+        ok(f"[Names] Compteur global synchronisé sur la DB: {max_key_num} bovins connus")
     # Worker asynchrone : découple DINOv2 de la boucle vidéo pour garantir
     # un FPS stable (le Re-ID ne bloque plus la détection).
     reid_worker = ReIDWorker(reid)
@@ -648,7 +664,10 @@ def detection_loop(args):
                                 )
                                 event = None
                                 if name is None:
-                                    name = f"Boeuf_{len(db.animals) + 1:03d}"
+                                    # Cle unique via compteur global persistant :
+                                    # garantit que les noms ne sont JAMAIS
+                                    # reutilises, meme apres un reset de DB.
+                                    name = next_bovin_key()
                                     # Identification du robe-type par analyse HSV
                                     # (breed.py → coat_type + breeds compatibles).
                                     # Instantané (<0.5ms), réutilise le crop courant.
