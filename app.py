@@ -19,7 +19,7 @@ from flask import Flask, Response, jsonify, render_template, request
 from werkzeug.utils import secure_filename
 
 from state import STATE, NumpyJSONProvider
-from processor import start_detection_thread, resolve_device
+from processor import start_detection_thread, resolve_device, _mlx_available
 from console import banner as log_banner, info, ok, warn, err
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
@@ -61,11 +61,19 @@ def parse_args():
                         "Défaut: 1ère vidéo trouvée à la racine du projet, "
                         "sinon '0'.")
     p.add_argument("--host", type=str, default="0.0.0.0")
-    p.add_argument("--port", type=int, default=5000)
-    # --- Modèles (recommandés 1660 Ti) ---
-    p.add_argument("--yolo-model", type=str, default="yolo11s-seg.pt",
-                   help="YOLO recommandé: yolo11s-seg.pt (GTX 1660 Ti). "
-                        "Évite l/x-seg sur 6GB VRAM.")
+    p.add_argument("--port", type=int, default=8100,
+                   help="Port du worker Python (Bun proxy dessus sur :8000).")
+    # --- Modèles ---
+    # Auto-sélection : YOLO26 MLX sur Apple Silicon (Metal GPU natif, ~26 FPS),
+    # sinon YOLO11s-seg PyTorch (MPS/CUDA/CPU).
+    import os as _os
+    _has_mlx_model = _os.path.exists(
+        _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "yolo26s-seg.safetensors")
+    )
+    _default_yolo = "yolo26s-seg.safetensors" if _has_mlx_model else "yolo11s-seg.pt"
+    p.add_argument("--yolo-model", type=str, default=_default_yolo,
+                   help="YOLO recommandé: yolo26s-seg.safetensors (MLX/Metal, Apple Silicon) "
+                        "ou yolo11s-seg.pt (PyTorch, CUDA/CPU).")
     p.add_argument("--dino-model", type=str, default="facebook/dinov2-small",
                    help="DINOv2 small = parfait pour 1660 Ti. -base/-large = trop lourd.")
     # --- Re-ID ---
@@ -106,7 +114,14 @@ app.json = NumpyJSONProvider(app)
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    """Point d'entrée du worker API. L'UI est servie par Bun (port 8000)."""
+    return jsonify({
+        "service": "boeuf-tracker-worker",
+        "version": "2.0",
+        "endpoints": ["/api/stats", "/api/devices", "/api/settings",
+                      "/api/videos", "/api/breeds", "/video_feed"],
+        "ui": "L'interface web est servie par Bun sur http://localhost:8000",
+    })
 
 
 @app.route("/video_feed")
@@ -174,15 +189,6 @@ def stats():
             "conf": STATE.get("desired_conf"),
         },
     })
-
-
-def _mlx_available() -> bool:
-    """Vérifie si MLX (Apple Metal GPU) est disponible."""
-    try:
-        import mlx.core as mx
-        return mx.is_available()
-    except Exception:
-        return False
 
 
 def _mps_available() -> bool:
@@ -394,6 +400,49 @@ def get_settings():
             "conf": STATE["desired_conf"],
         },
     })
+
+
+@app.route("/api/breeds")
+def list_breeds():
+    """Liste toutes les races connues avec leurs descriptions (pour l'UI Bun)."""
+    from breed import BREEDS
+    return jsonify({
+        "breeds": [
+            {"name": name, **info}
+            for name, info in BREEDS.items()
+        ],
+        "count": len(BREEDS),
+    })
+
+
+@app.route("/api/breeds/<path:breed_name>")
+def breed_detail(breed_name):
+    """Détail d'une race spécifique (origine, robe, caractéristiques)."""
+    from breed import get_breed_info
+    info = get_breed_info(breed_name)
+    if info is None:
+        return jsonify({"ok": False, "error": f"race inconnue: {breed_name}"}), 404
+    return jsonify({"name": breed_name, **info})
+
+
+@app.route("/api/animals")
+def list_animals():
+    """Liste tous les animaux identifiés en DB (avec leur race)."""
+    # db est instancié dans le thread processor ; on le récupère via STATE
+    # ou on le recrée en lecture seule. Pour éviter une re-init, on utilise
+    # un accès différé via un module-level holder.
+    from database import EmbeddingDatabase
+    db = EmbeddingDatabase(path="cattle_db.pkl")
+    animals = []
+    for name, data in db.animals.items():
+        animals.append({
+            "name": name,
+            "breed": data.get("breed", "Indéterminée"),
+            "breed_confidence": data.get("breed_confidence", 0),
+            "count": data.get("count", 0),
+            "first_seen": data.get("first_seen"),
+        })
+    return jsonify({"animals": animals, "count": len(animals)})
 
 
 @app.route("/api/bench", methods=["GET"])

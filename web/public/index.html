@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🐄 Boeuf Tracker</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐄</text></svg>">
+    <link rel="stylesheet" href="/styles.css">
+    <script>
+        // Applique le thème AVANT le render (pas de flash)
+        const saved = localStorage.getItem('theme') || 'dark';
+        document.documentElement.setAttribute('data-theme', saved);
+    </script>
+</head>
+<body>
+    <!-- Topbar -->
+    <header class="topbar">
+        <div class="topbar-left">
+            <span class="logo">🐄 Boeuf Tracker</span>
+        </div>
+        <div class="topbar-meta" id="meta-bar">
+            <span id="meta-source" class="meta-item">source: --</span>
+            <span class="meta-sep">/</span>
+            <span id="meta-device" class="meta-item">device: --</span>
+            <span class="meta-sep">/</span>
+            <span id="meta-fps" class="meta-item">fps: --</span>
+            <span class="meta-sep">/</span>
+            <span id="meta-frames" class="meta-item">frames: 0</span>
+            <span id="meta-pending" class="meta-pending" style="display:none"></span>
+        </div>
+        <button id="btn-theme" class="btn-icon" title="Basculer thème">🌙</button>
+    </header>
+
+    <!-- Source bar -->
+    <div class="source-bar">
+        <div class="control-group">
+            <span class="control-label">Source</span>
+            <select id="video-select" class="select">
+                <option value="">— Choisir une vidéo —</option>
+            </select>
+            <input type="file" id="video-input" accept="video/*" class="hidden">
+            <button id="btn-upload" class="btn btn-outline">Upload</button>
+            <button id="btn-webcam" class="btn btn-outline">Webcam</button>
+            <span id="current-source" class="current-source">--</span>
+        </div>
+        <div class="control-group">
+            <span class="control-label">Device</span>
+            <select id="device-select" class="select select-sm">
+                <option value="auto">Auto</option>
+            </select>
+            <span id="device-status" class="status-text"></span>
+        </div>
+        <div class="control-group control-right">
+            <span id="upload-status" class="status-text"></span>
+            <button id="btn-reset-db" class="btn btn-warning-outline">Reset DB</button>
+        </div>
+    </div>
+
+    <!-- Main -->
+    <main class="main-grid">
+        <!-- Video -->
+        <section class="video-section">
+            <div class="video-container">
+                <img id="stream" alt="flux" class="video-stream">
+            </div>
+            <div class="video-legend">
+                <span class="dot dot-green"></span>
+                <span>bovin identifié</span>
+            </div>
+        </section>
+
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <!-- Paramètres live -->
+            <div class="card">
+                <h3 class="card-title">Paramètres (live)</h3>
+                <div class="card-body">
+                    <div class="setting-row">
+                        <label class="setting-label">Modèle YOLO</label>
+                        <select id="setting-model" class="select select-full"></select>
+                        <p id="hint-model" class="setting-hint">~ ? FPS</p>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label">Résolution (imgsz)</label>
+                        <div class="btn-group">
+                            <button class="btn btn-sm btn-outline" data-imgsz="320">320</button>
+                            <button class="btn btn-sm btn-outline" data-imgsz="416">416</button>
+                            <button class="btn btn-sm btn-outline" data-imgsz="640">640</button>
+                            <button class="btn btn-sm btn-outline" data-imgsz="960">960</button>
+                            <button class="btn btn-sm btn-outline" data-imgsz="1280">1280</button>
+                        </div>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label">Re-embed tous les N frames</label>
+                        <input id="setting-embed" type="range" min="1" max="60" value="10" class="range">
+                        <div class="range-labels">
+                            <span>1 (précis)</span>
+                            <span id="setting-embed-val">10</span>
+                            <span>60 (rapide)</span>
+                        </div>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label">Seuil Re-ID</label>
+                        <input id="setting-threshold" type="range" min="0.30" max="0.95" step="0.01" value="0.65" class="range">
+                        <div class="range-labels">
+                            <span>0.30</span>
+                            <span id="setting-threshold-val">0.65</span>
+                            <span>0.95</span>
+                        </div>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label">Confiance YOLO</label>
+                        <input id="setting-conf" type="range" min="0.10" max="0.90" step="0.05" value="0.40" class="range">
+                        <div class="range-labels">
+                            <span>0.10</span>
+                            <span id="setting-conf-val">0.40</span>
+                            <span>0.90</span>
+                        </div>
+                    </div>
+                    <div class="setting-row setting-actions">
+                        <span id="settings-status" class="status-text status-success"></span>
+                        <button id="btn-rematch" class="btn btn-sm btn-primary" title="Force la ré-identification">🔄 Re-match</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Animaux -->
+            <div class="card">
+                <h3 class="card-title">Animaux détectés</h3>
+                <div class="card-body">
+                    <p class="card-subtitle"><span id="active-count" class="text-success text-bold">0</span> actuellement visibles</p>
+                    <ul id="animal-list" class="list">
+                        <li class="list-empty">Aucun animal visible</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Journal -->
+            <div class="card">
+                <h3 class="card-title">Journal</h3>
+                <div class="card-body">
+                    <p class="card-subtitle">Derniers événements</p>
+                    <ul id="event-list" class="list list-mono">
+                        <li class="list-empty">Aucun événement</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Activités -->
+            <div class="card">
+                <h3 class="card-title">Activités</h3>
+                <div class="card-body">
+                    <p class="card-subtitle">Comportement détecté</p>
+                    <ul id="behavior-list" class="list">
+                        <li class="list-empty">Aucune activité</li>
+                    </ul>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <!-- Modal reset DB -->
+    <dialog id="modal-reset" class="modal">
+        <div class="modal-content">
+            <h3 class="modal-title">Réinitialiser la base ?</h3>
+            <p>Tous les bovins identifiés seront oubliés. Les prochaines détections repartiront à zéro.</p>
+            <div class="modal-actions">
+                <button id="btn-reset-cancel" class="btn btn-ghost">Annuler</button>
+                <button id="btn-reset-confirm" class="btn btn-warning">Purger</button>
+            </div>
+        </div>
+    </dialog>
+
+    <script src="/app.js"></script>
+</body>
+</html>
