@@ -145,18 +145,29 @@ class NameGenerator:
     """
 
     def __init__(self, animals: dict):
-        """animals : dict {key: {first_seen, ...}} du EmbeddingDatabase"""
-        # Tri par first_seen (les plus anciens d'abord) pour ordre stable.
-        sorted_animals = sorted(
-            animals.items(),
-            key=lambda x: x[1].get("first_seen") or "",
-        )
+        """animals : dict {key: {first_seen, ...}} du EmbeddingDatabase
+
+        Le mapping se fait par le NUMERO de la cle (Boeuf_004 -> NAME_POOL[3]),
+        PAS par l'index de tri. Ainsi, apres un switch de video qui vide la DB,
+        les nouveaux Boeuf_004+ recoivent des noms DIFFERENTS de Boeuf_001-003
+        qui etaient dans la video precedente.
+        """
         self._mapping: dict[str, str] = {}
-        for idx, (key, _) in enumerate(sorted_animals):
+        for key in animals:
+            # Extrait le numero: Boeuf_004 -> 4 -> index 3 (0-based)
+            idx = -1
+            if key.startswith("Boeuf_"):
+                try:
+                    idx = int(key.split("_")[1]) - 1
+                except (ValueError, IndexError):
+                    idx = -1
+            if idx < 0:
+                # Cle non standard: fallback hash stable
+                idx = abs(hash(key)) % len(NAME_POOL)
             if idx < len(NAME_POOL):
                 self._mapping[key] = NAME_POOL[idx]
             else:
-                # Au-delà du pool : combinaison suffixée (rare en pratique)
+                # Au-dela du pool : combinaison suffixee (rare en pratique)
                 base = NAME_POOL[idx % len(NAME_POOL)]
                 cycle = idx // len(NAME_POOL)
                 self._mapping[key] = f"{base} {cycle + 2}"

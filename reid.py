@@ -40,9 +40,9 @@ class CattleReID:
         self,
         model_name: str = "facebook/dinov2-small",
         device: str = "cpu",
-        dino_weight: float = 0.5,
-        hsv_weight: float = 0.3,
-        lbp_weight: float = 0.2,
+        dino_weight: float = 0.7,
+        hsv_weight: float = 0.2,
+        lbp_weight: float = 0.1,
         use_compile: bool = True,
     ):
         """

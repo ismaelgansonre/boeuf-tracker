@@ -77,9 +77,10 @@ def parse_args():
     p.add_argument("--dino-model", type=str, default="facebook/dinov2-small",
                    help="DINOv2 small = parfait pour 1660 Ti. -base/-large = trop lourd.")
     # --- Re-ID ---
-    p.add_argument("--threshold", type=float, default=0.65,
-                   help="Seuil cosine Re-ID normal (0.6-0.75).")
-    p.add_argument("--loop-threshold", type=float, default=0.45,
+    p.add_argument("--threshold", type=float, default=0.70,
+                   help="Seuil cosine Re-ID normal (0.65-0.80). Plus haut = "
+                        "moins de faux positifs entre bovins similaires.")
+    p.add_argument("--loop-threshold", type=float, default=0.55,
                    help="Seuil permissif juste après un rebobinage vidéo "
                         "(ré-id cross-loop).")
     p.add_argument("--loop-grace-frames", type=int, default=60,
@@ -504,6 +505,25 @@ def heatmap():
     if collector is None:
         return jsonify({"ok": False, "error": "analytics non initialise"}), 503
     return jsonify(collector.get_heatmap())
+
+
+@app.route("/api/profiles")
+def profiles():
+    """Profils detailles par bovin pour l'onglet Statistiques.
+
+    Pour chaque bovin : dans quelles videos il a ete vu, ce qu'il faisait
+    (mangeait, marchait...), et les pourcentages de temps par activite.
+    """
+    from analytics import get as get_analytics
+    collector = get_analytics()
+    if collector is None:
+        return jsonify({"ok": False, "error": "analytics non initialise"}), 503
+    profs = collector.get_profiles()
+    return jsonify({
+        "ok": True,
+        "profiles": profs,
+        "count": len(profs),
+    })
 
 
 @app.route("/api/bench", methods=["GET"])

@@ -70,7 +70,7 @@ STATE = {
     "yolo_model_current": "",     # modele YOLO actif
     "imgsz_current": 640,
     "embed_every_current": 10,
-    "threshold_current": 0.65,
+    "threshold_current": 0.70,
     "conf_current": 0.4,
     "ui_dir": "web/public",       # repertoire de l'UI statique (sert sans Bun)
     "models_available": [

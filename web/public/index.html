@@ -31,6 +31,7 @@
         </div>
         <button id="btn-theme" class="btn-icon theme-btn" title="Basculer theme">DARK</button>
         <button id="btn-dashboard" class="btn-icon" title="Ouvrir le dashboard">Analytics</button>
+        <button id="btn-stats" class="btn-icon" title="Statistiques par bovin">Statistiques</button>
     </header>
 
     <!-- Source bar -->
@@ -238,6 +239,18 @@
                 </div>
                 <ul id="timeline-list" class="timeline-list"></ul>
             </div>
+        </div>
+    </aside>
+
+    <!-- Panneau Statistiques (profils par bovin) -->
+    <aside id="stats-panel" class="dashboard-panel">
+        <div class="dashboard-header">
+            <h2>Statistiques par bovin</h2>
+            <button id="btn-stats-close" class="btn-icon">×</button>
+        </div>
+        <div class="dashboard-content">
+            <p class="card-subtitle" id="stats-summary">Chargement...</p>
+            <div id="stats-list" class="stats-list"></div>
         </div>
     </aside>
 

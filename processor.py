@@ -308,6 +308,8 @@ def detection_loop(args):
         detector = CattleDetector(model_name=args.yolo_model, device=device)
     reid = CattleReID(model_name=args.dino_model, device=reid_device)
     db = EmbeddingDatabase(path=args.db, reid_engine=reid)
+    # Reference globale pour permettre le reset de DB au switch de video.
+    STATE["db"] = db
     # Synchronise le compteur global avec la DB existante : si la DB contient
     # Boeuf_012 mais le compteur est a 0, on remonte le compteur a 12 pour
     # garantir que le prochain bovin sera Boeuf_013 (jamais de doublon).
@@ -499,6 +501,23 @@ def detection_loop(args):
                         track_emb_accum.clear()
                         STATE["_track_names"] = track_id_to_name
                         reset_for_new_source()
+                        # VIDE la DB des embeddings au switch de video : les
+                        # bovins de la nouvelle video doivent recevoir de
+                        # NOUVEAUX noms, pas heriter de ceux de la video
+                        # precedente. Le compteur global (names_counter.json)
+                        # garantit que les nouveaux noms sont uniques (jamais
+                        # de reutilisation d'un nom deja utilise dans une
+                        # video anterieure).
+                        db = STATE.get("db")
+                        if db is not None and db.animals:
+                            n_before = len(db.animals)
+                            db.animals.clear()
+                            db._dirty = True
+                            db.save()
+                            name_gen.__init__(db.animals)
+                            STATE["name_gen"] = name_gen
+                            ok(f"[Switch] DB purgee: {n_before} bovins oublies "
+                               f"(nouveaux noms depuis le compteur global)")
                         ok(f"[Switch] OK: {STATE['source_label']}")
                     else:
                         cap = open_capture(STATE["current_source_path"]) or cap
@@ -789,6 +808,7 @@ def detection_loop(args):
                                     cx_norm=cx_norm,
                                     cy_norm=cy_norm,
                                     behavior=behavior_now,
+                                    source=STATE.get("source_label", "inconnu"),
                                 ))
                             except Exception:
                                 pass

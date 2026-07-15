@@ -42,6 +42,7 @@ class DetectionSample:
     cx_norm: float                  # position X normalisee 0-1
     cy_norm: float                  # position Y normalisee 0-1
     behavior: str                   # 'grazing', 'walking', 'lying', ...
+    source: str = ""                # nom de la video/source courante
 
 
 @dataclass
@@ -64,6 +65,60 @@ class AnalyticsState:
             "detection_count": len(self.detection_samples),
             "timeline_events": self.timeline_events[-MAX_TIMELINE_EVENTS:],
         }
+
+    def compute_profiles(self) -> dict:
+        """Agrege les detection_samples en profils par bovin.
+
+        Pour chaque bovin (cle proper_name), on calcule :
+          - total_samples : nombre total de detections
+          - videos : {nom_video: count} -> dans quelles videos il a ete vu
+          - activities : {behavior: count} -> ce qu'il faisait
+          - activities_pct : {behavior: pct} -> en pourcentage
+          - first_seen / last_seen : fenetre temporelle
+          - breed : derniere race connue
+        """
+        # {proper_name: {key, breed, samples, videos: {src: n}, acts: {beh: n}, frames: [min,max]}}
+        raw: dict = defaultdict(lambda: {
+            "key": "", "breed": "Indeterminee",
+            "total": 0,
+            "videos": defaultdict(int),
+            "activities": defaultdict(int),
+            "min_frame": None, "max_frame": None,
+        })
+        for s in self.detection_samples:
+            name = s.get("proper_name") or s.get("key") or "?"
+            r = raw[name]
+            r["key"] = s.get("key", r["key"])
+            breed = s.get("breed")
+            if breed and breed != "Indeterminate":
+                r["breed"] = breed
+            r["total"] += 1
+            src = s.get("source") or "inconnu"
+            r["videos"][src] += 1
+            act = s.get("behavior") or "active"
+            r["activities"][act] += 1
+            fr = s.get("frame")
+            if fr is not None:
+                r["min_frame"] = fr if r["min_frame"] is None else min(r["min_frame"], fr)
+                r["max_frame"] = fr if r["max_frame"] is None else max(r["max_frame"], fr)
+
+        # Conversion en format serialisable + pourcentages
+        profiles = {}
+        for name, r in raw.items():
+            total = r["total"] or 1
+            profiles[name] = {
+                "key": r["key"],
+                "breed": r["breed"],
+                "total_samples": r["total"],
+                "videos": dict(r["videos"]),
+                "video_count": len(r["videos"]),
+                "activities": dict(r["activities"]),
+                "activities_pct": {k: round(v / total * 100, 1)
+                                   for k, v in r["activities"].items()},
+                "first_frame": r["min_frame"],
+                "last_frame": r["max_frame"],
+            }
+        return profiles
 
 
 class AnalyticsCollector:
@@ -215,6 +270,15 @@ class AnalyticsCollector:
         except Exception:
             data["breed_colors"] = {}
         return data
+
+    def get_profiles(self) -> dict:
+        """Retourne les profils agregees par bovin pour l'onglet Statistiques.
+
+        Format : {proper_name: {key, breed, total_samples, videos, video_count,
+                  activities, activities_pct, first_frame, last_frame}}
+        """
+        with self._lock:
+            return self.state.compute_profiles()
 
     def get_heatmap(self) -> dict:
         """Retourne les positions pour la heatmap.

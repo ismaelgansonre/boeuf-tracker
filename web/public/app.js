@@ -600,3 +600,101 @@ async function refreshDashboard() {
     }
 }
 setInterval(() => { if (dashPanel.classList.contains('open')) refreshDashboard(); }, 3000);
+
+// ════════════════════════════════════════════════════════════════════════
+// PANNEAU STATISTIQUES (profils par bovin)
+// ════════════════════════════════════════════════════════════════════════
+const statsPanel = $('stats-panel');
+$('btn-stats').addEventListener('click', () => {
+    statsPanel.classList.add('open');
+    refreshStats();
+});
+$('btn-stats-close').addEventListener('click', () => statsPanel.classList.remove('open'));
+
+// Traductions des comportements (clés internes -> labels francais)
+const BEHAVIOR_LABELS = {
+    active: 'Actif', immobile: 'Immobile', marche: 'Marche',
+    court: 'Court', rue: 'Rue', lying: 'Couche', grazing: 'Pature',
+    walking: 'Marche', standing: 'Debout',
+};
+
+// Couleurs pour les barres d'activite
+const ACT_COLORS = {
+    active: '#16a34a', marche: '#3b82f6', court: '#f59e0b',
+    rue: '#ef4444', immobile: '#6b7280', lying: '#8b5cf6',
+    grazing: '#22c55e', standing: '#0ea5e9', walking: '#3b82f6',
+};
+
+function behaviorLabel(k) { return BEHAVIOR_LABELS[k] || k; }
+function actColor(k) { return ACT_COLORS[k] || '#64748b'; }
+
+async function refreshStats() {
+    try {
+        const res = await fetch('/api/profiles');
+        const d = await res.json();
+        if (!d.ok) return;
+        const profiles = d.profiles;
+        const names = Object.keys(profiles).sort();
+
+        $('stats-summary').textContent =
+            `${d.count} bovin${d.count > 1 ? 's' : ''} identifie${d.count > 1 ? 's' : ''}`;
+
+        if (names.length === 0) {
+            $('stats-list').innerHTML =
+                '<p class="list-empty">Aucun bovin encore identifie. Lancez une video.</p>';
+            return;
+        }
+
+        $('stats-list').innerHTML = names.map(name => {
+            const p = profiles[name];
+            // Tri des activites par pourcentage decroissant
+            const acts = Object.entries(p.activities_pct || {})
+                .sort((a, b) => b[1] - a[1]);
+            const total = p.total_samples || 0;
+            // Liste des videos
+            const videos = Object.entries(p.videos || {})
+                .sort((a, b) => b[1] - a[1]);
+
+            return `
+            <div class="card stats-card">
+                <div class="stats-card-header">
+                    <span class="stats-name">${escapeHtml(name)}</span>
+                    <span class="stats-breed">${escapeHtml(p.breed || 'Indeterminee')}</span>
+                    <span class="stats-count">${total} detections</span>
+                </div>
+                <div class="stats-meta">
+                    <span class="stats-meta-item">Cle: ${escapeHtml(p.key || '?')}</span>
+                    <span class="stats-meta-item">Videos: ${p.video_count || 0}</span>
+                </div>
+                ${videos.length > 0 ? `
+                <div class="stats-section">
+                    <div class="stats-section-title">Vu dans (${videos.length} video${videos.length > 1 ? 's' : ''})</div>
+                    <ul class="stats-video-list">
+                        ${videos.map(([v, c]) => `
+                            <li><span class="stats-video-name">${escapeHtml(v)}</span>
+                                <span class="stats-video-count">${c} ech.</span></li>
+                        `).join('')}
+                    </ul>
+                </div>` : ''}
+                ${acts.length > 0 ? `
+                <div class="stats-section">
+                    <div class="stats-section-title">Activites (% du temps)</div>
+                    <div class="stats-acts">
+                        ${acts.map(([k, pct]) => `
+                            <div class="stats-act-row">
+                                <span class="stats-act-label">${escapeHtml(behaviorLabel(k))}</span>
+                                <div class="stats-act-bar-bg">
+                                    <div class="stats-act-bar" style="width:${pct}%;background:${actColor(k)}"></div>
+                                </div>
+                                <span class="stats-act-pct">${pct}%</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>` : ''}
+            </div>`;
+        }).join('');
+    } catch (e) {
+        console.error('stats refresh error:', e);
+    }
+}
+setInterval(() => { if (statsPanel.classList.contains('open')) refreshStats(); }, 5000);
