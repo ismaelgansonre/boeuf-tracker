@@ -208,11 +208,14 @@ class EmbeddingDatabase:
         w = self.reid_engine
         return (w.w_dino * sim_d + w.w_hsv * sim_h + w.w_lbp * sim_l).astype(np.float32)
 
-    def add(self, name: str, embedding: np.ndarray) -> None:
+    def add(self, name: str, embedding: np.ndarray, breed: str = None,
+            breed_confidence: float = None) -> None:
         self.animals[name] = {
             "embedding": np.asarray(embedding, dtype=np.float32).ravel(),
             "count": 1,
             "first_seen": datetime.now().isoformat(timespec="seconds"),
+            "breed": breed,
+            "breed_confidence": breed_confidence,
         }
         self._dirty = True
 

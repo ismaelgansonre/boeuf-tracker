@@ -107,6 +107,7 @@ class CattleDetectorMLX:
         self.device = device
         self.half = True  # MLX utilise FP16 nativement
         self._mlx_lock = threading.Lock()  # instance lock (thread-safety Metal)
+        self._iou_tracker = _SimpleIoUTracker(iou_threshold=0.3, max_lost=30)
 
         info(f"[YOLO26-MLX] Chargement de {model_name} sur MLX (Metal GPU)...")
 
@@ -145,70 +146,66 @@ class CattleDetectorMLX:
         """Detecte + segmente les bovins. Retourne un objet compatible avec
         le format Ultralytics (boxes.xyxy, boxes.id, boxes.conf, masks).
 
-        YOLO26 MLX model.track() a un bug (TypeError) quand une frame
-        precedente n'a pas de detections (masks devient None). On capture
-        cette erreur et on retombe en mode predict() (sans tracking) pour
-        cette frame. Le tracking reprendra sur les frames suivantes.
+        _detect_inner fait déjà le filtrage 'cow' (cls == 19) + le tracking
+        IoU et retourne un _MLXResult prêt à consommer. On ne re-filtre PAS
+        ici : _MLXBoxes.cls est un placeholder (np.zeros) qui n'est pas la
+        vraie classe — un double filtrage ici éliminerait toutes les
+        détections (0 == 19 → False).
 
         Le lock sérialise les appels pour éviter un crash Metal (SIGABRT)
         quand deux appels MLX sont simultanés (Flask threaded mode).
         """
         with self._mlx_lock:
-            result = self._detect_inner(frame, persist, conf, imgsz)
-
-        # YOLO26 MLX detecte toutes les classes. On filtre pour garder
-        # uniquement les 'cow' (cls == 19)
-        boxes = result.boxes
-        if boxes is None or len(boxes.xyxy) == 0:
-            return _empty_result_mlx()
-
-        cls = boxes.cls
-        if cls is None or len(cls) == 0:
-            return _empty_result_mlx()
-
-        # Build mask index (cow class = 19)
-        cow_mask = np.array(cls) == self.COW_CLASS_ID
-        if not cow_mask.any():
-            return _empty_result_mlx()
-
-        # Filter boxes, ids, confs, masks for cow class only
-        xyxy = np.array(boxes.xyxy)[cow_mask]
-        ids = np.array(boxes.id)[cow_mask] if boxes.id is not None else None
-        confs = np.array(boxes.conf)[cow_mask]
-
-        masks_data = None
-        if result.masks is not None and result.masks.data is not None:
-            masks_all = np.array(result.masks.data)
-            masks_data = masks_all[cow_mask]
-
-        # Return a duck-typed result compatible with Ultralytics format
-        return _MLXResult(xyxy, ids, confs, masks_data)
+            return self._detect_inner(frame, persist, conf, imgsz)
 
     def _detect_inner(self, frame, persist, conf, imgsz):
-        """Inner detect with simple retry (no model reinit to avoid crash)."""
+        """Inner detect with simple retry (no model reinit to avoid crash).
+
+        On utilise predict() au lieu de track() car yolo26mlx a un bug dans
+        TrackerManager.update() qui perd les masques (il recree un Results
+        sans masks). predict() retourne bien boxes + masks, et notre IoU
+        tracker ci-dessous maintient les IDs entre frames.
+
+        Retourne un _MLXResult directement (boxes filtrees bovins + masks)
+        pour eviter tout probleme d'attributs sur l'objet Boxes yolo26mlx.
+        """
         for attempt in range(2):
             try:
-                return self.model.track(
-                    frame,
-                    persist=persist,
-                    conf=conf,
-                    imgsz=imgsz,
-                    tracker="bytetrack.yaml",
-                )[0]
-            except TypeError:
-                # yolo26mlx bug: masks=None crash le tracker. Fallback predict.
-                return self.model.predict(
+                pred = self.model.predict(
                     frame,
                     conf=conf,
                     imgsz=imgsz,
                 )[0]
+
+                boxes = pred.boxes
+                if boxes is None or len(boxes.xyxy) == 0:
+                    return _empty_result_mlx()
+
+                xyxy_all = np.array(boxes.xyxy)
+                cls_all = np.array(boxes.cls) if boxes.cls is not None else None
+                conf_all = np.array(boxes.conf) if boxes.conf is not None else None
+
+                # Filtrer pour garder uniquement les 'cow' (cls == 19)
+                cow_mask = cls_all == self.COW_CLASS_ID if cls_all is not None else np.ones(len(xyxy_all), dtype=bool)
+                if not cow_mask.any():
+                    return _empty_result_mlx()
+
+                xyxy_cows = xyxy_all[cow_mask]
+                conf_cows = conf_all[cow_mask] if conf_all is not None else np.ones(len(xyxy_cows))
+
+                # Appliquer le tracker IoU sur les boxes de bovins uniquement
+                ids_cows = self._iou_tracker.update(xyxy_cows)
+
+                masks_data = None
+                if pred.masks is not None and pred.masks.data is not None:
+                    masks_all = np.array(pred.masks.data)
+                    masks_data = masks_all[cow_mask]
+
+                return _MLXResult(xyxy_cows, ids_cows, conf_cows, masks_data)
             except Exception as e:
                 if attempt < 1:
                     warn(f"[YOLO26-MLX] Retry {attempt+1} after error: {e}")
                 else:
-                    # Last attempt: return empty result
-                    warn(f"[YOLO26-MLX] All retries failed: {e}")
-                    return _empty_result_mlx()
                     warn(f"[YOLO26-MLX] All retries failed: {e}")
                     return _empty_result_mlx()
 
@@ -326,3 +323,87 @@ def _empty_result_mlx():
         'boxes': empty_boxes,
         'masks': None,
     })()
+
+
+class _SimpleIoUTracker:
+    """Tracker IoU simple pour YOLO26 MLX.
+
+    yolo26mlx.TrackerManager.update() perd les masques (il recree un Results
+    sans masks quand il applique ByteTrack). Comme on ne peut pas utiliser
+    track() pour avoir les masques, on utilise predict() et on maintient
+    nos propres IDs par IoU matching.
+
+    Strategie:
+    - Pour chaque nouvelle detection, on cherche la box precedente avec
+      l'IoU le plus eleve.
+    - Si IoU > seuil, on conserve le meme ID.
+    - Sinon, on assigne un nouvel ID.
+    - Les tracks perdues depuis >max_lost frames sont retirees.
+
+    Note: ce tracker est basique mais fonctionne pour des sequences video
+    ou les bovins bougent peu entre frames consecutives. Pour du tracking
+    plus robuste (occlusions, mouvements rapides), il faudrait implementer
+    ByteTrack ou SORT/DeepSORT. Pour notre cas d'usage (vaches dans un
+    champ), c'est suffisant.
+    """
+
+    def __init__(self, iou_threshold: float = 0.3, max_lost: int = 30):
+        self.iou_threshold = iou_threshold
+        self.max_lost = max_lost
+        self._next_id = 1
+        # Liste de tuples (xyxy, track_id, frames_since_last_seen)
+        self._tracks = []
+
+    def _iou(self, box_a, box_b):
+        """Calcule l'IoU entre deux boxes (format xyxy)."""
+        x1 = max(box_a[0], box_b[0])
+        y1 = max(box_a[1], box_b[1])
+        x2 = min(box_a[2], box_b[2])
+        y2 = min(box_a[3], box_b[3])
+        inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        area_a = max(0.0, box_a[2] - box_a[0]) * max(0.0, box_a[3] - box_a[1])
+        area_b = max(0.0, box_b[2] - box_b[0]) * max(0.0, box_b[3] - box_b[1])
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0
+
+    def update(self, xyxy_boxes):
+        """Met a jour le tracker avec les nouvelles boxes. Retourne les IDs."""
+        # Incrementer l'age des tracks existants
+        for track in self._tracks:
+            track["lost"] += 1
+
+        ids = []
+        used_track_indices = set()
+
+        for box in xyxy_boxes:
+            best_iou = 0.0
+            best_idx = -1
+
+            for idx, track in enumerate(self._tracks):
+                if idx in used_track_indices:
+                    continue
+                iou = self._iou(box, track["box"])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_idx = idx
+
+            if best_iou >= self.iou_threshold and best_idx >= 0:
+                # Match: conserver l'ID existant
+                track = self._tracks[best_idx]
+                track["box"] = box
+                track["lost"] = 0
+                ids.append(track["id"])
+                used_track_indices.add(best_idx)
+            else:
+                # Nouvelle detection
+                new_id = self._next_id
+                self._next_id += 1
+                self._tracks.append({"box": box, "id": new_id, "lost": 0})
+                ids.append(new_id)
+
+        # Nettoyer les tracks perdues depuis trop longtemps
+        self._tracks = [
+            t for t in self._tracks if t["lost"] <= self.max_lost
+        ]
+
+        return np.array(ids, dtype=np.int64)

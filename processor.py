@@ -31,6 +31,19 @@ except Exception:
         def deco(fn): return fn
         return deco
 
+    # Import différé pour éviter une dépendance circulaire au moment du
+    # fallback (console ne dépend de personne ici). On prévient explicitement
+    # que les JIT sont désactivées pour que la dégradation de perf soit visible.
+    try:
+        from console import warn as _warn_fallback
+        _warn_fallback(
+            "[Numba] numba non installé — _total_displacement et "
+            "_classify_behavior tournent en Python pur (×5-10 plus lent). "
+            "Installez avec: pip install numba"
+        )
+    except Exception:
+        pass
+
 
 @_njit(cache=True, fastmath=True)
 def _total_displacement(pts_x, pts_y):
@@ -72,29 +85,43 @@ from console import info, ok, warn, err, dbg, evt, loop as log_loop
 from detector import CattleDetector, CattleDetectorMLX
 from reid import CattleReID
 from database import EmbeddingDatabase
+from reid_worker import ReIDWorker
+from breed import classify_breed
 from state import STATE, color_for_name, reset_for_new_source
 from capture import open_capture, source_label
 
 
 def annotate_frame(annotated, masks_data, det_idx, x1, y1, x2, y2, color):
-    """Dessine le masque de segmentation (silhouette) si dispo, sinon rectangle."""
+    """Dessine le masque de segmentation (silhouette) si dispo, sinon rectangle.
+
+    Optimisé : on ne traite que la région de la bounding box (ROI) au lieu de
+    toute l'image. Évite d'allouer un np.zeros_like(full_frame) par bovin et
+    un addWeighted sur l'image complète — ces deux ops coûtaient ~29ms/frame.
+    """
     mask_drawn = False
     if masks_data is not None and det_idx < len(masks_data):
         try:
             m = masks_data[det_idx]
+            H, W = annotated.shape[:2]
+            # Resize du masque une seule fois à la taille de l'image
             mask_resized = cv2.resize(
-                m, (annotated.shape[1], annotated.shape[0]),
-                interpolation=cv2.INTER_LINEAR,
+                m, (W, H), interpolation=cv2.INTER_LINEAR,
             )
             bin_mask = (mask_resized > 0.5).astype(np.uint8)
+            # ROI = bounding box + petite marge : on ne travaille que dessus
+            rx1, ry1 = max(0, x1 - 4), max(0, y1 - 4)
+            rx2, ry2 = min(W, x2 + 4), min(H, y2 + 4)
+            roi = annotated[ry1:ry2, rx1:rx2]
+            roi_mask = bin_mask[ry1:ry2, rx1:rx2]
+            # Tint subtil (8%) uniquement sur la ROI
+            tint = np.zeros_like(roi)
+            tint[roi_mask == 1] = color
+            annotated[ry1:ry2, rx1:rx2] = cv2.addWeighted(roi, 1.0, tint, 0.08, 0)
+            # Contour net sur la ROI (coords relatives)
             contours, _ = cv2.findContours(
-                bin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+                roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
             )
-            # Tint intérieur subtil (8%) + contour net
-            tint = np.zeros_like(annotated)
-            tint[bin_mask == 1] = color
-            annotated[:] = cv2.addWeighted(annotated, 1.0, tint, 0.08, 0)
-            cv2.drawContours(annotated, contours, -1, color, 2)
+            cv2.drawContours(annotated[ry1:ry2, rx1:rx2], contours, -1, color, 2)
             mask_drawn = True
         except Exception:
             pass
@@ -154,19 +181,41 @@ def analyze_behavior(boxes, track_ids, t_now, frame_shape=None):
 
 
 def _mlx_available() -> bool:
-    """Vérifie si MLX (Apple Metal GPU) est disponible."""
+    """Vérifie si MLX (Apple Metal GPU) est disponible.
+
+    Source unique de vérité (utilisée aussi par app.py via import) — ne pas
+    dupliquer ailleurs. MLX >= 0.30 exige un argument device ; les versions
+    plus anciennes ne prenaient aucun argument. On gère les deux pour rester
+    robuste aux futures montées de version.
+    """
     try:
         import mlx.core as mx
-        return mx.is_available()
+        try:
+            return bool(mx.is_available(mx.gpu))  # MLX 0.30+
+        except TypeError:
+            return bool(mx.is_available())  # vieille API MLX (< 0.30)
     except Exception:
         return False
 
 
-def resolve_device(requested: str) -> str:
-    # MLX = priorité maximale sur Apple Silicon
-    if requested in ("auto", "mlx"):
+def resolve_device(requested: str, for_pytorch: bool = False) -> str:
+    """Résout le device de calcul.
+
+    for_pytorch: si True, on ne retourne JAMAIS 'mlx' car PyTorch (DINOv2)
+    ne supporte que cpu/cuda/mps. MLX est un backend séparé réservé à YOLO26.
+    Utilisé pour le device du Re-ID (DINOv2) quand le détecteur tourne sur MLX.
+    """
+    # MLX = priorité maximale sur Apple Silicon (YOLO uniquement)
+    if requested in ("auto", "mlx") and not for_pytorch:
         if _mlx_available():
             return "mlx"
+        if torch.cuda.is_available():
+            return "cuda:0"
+        if torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+    # Device PyTorch (DINOv2) : on saute mlx, on prend cuda > mps > cpu
+    if requested in ("auto", "mlx") and for_pytorch:
         if torch.cuda.is_available():
             return "cuda:0"
         if torch.backends.mps.is_available():
@@ -200,15 +249,42 @@ def detection_loop(args):
     STATE["started_at"] = datetime.now().isoformat(timespec="seconds")
 
     # MLX: YOLO26 sur Metal GPU Apple (2.6× plus rapide que PyTorch MPS)
+    # Auto-détection : si MLX est dispo et qu'on est en mode "auto", on
+    # l'utilise automatiquement (backend natif le plus rapide). On bascule
+    # aussi le modèle par défaut vers le modèle MLX si nécessaire.
     use_mlx = getattr(args, "mlx", False)
+    if not use_mlx and args.device in ("auto", "mlx") and _mlx_available():
+        # Vérifier qu'un modèle MLX (.safetensors ou yolo26) est disponible
+        model_is_mlx = (
+            args.yolo_model.endswith(".safetensors")
+            or args.yolo_model.startswith("yolo26")
+        )
+        if model_is_mlx:
+            use_mlx = True
+            ok(f"[Init] MLX auto-detecté (modèle {args.yolo_model} compatible). "
+               f"Activation du backend Metal natif.")
+        else:
+            # Modèle PyTorch (yolo11*.pt) mais MLX dispo : on garde PyTorch
+            # sur MPS. resolve_device doit retourner mps, pas mlx.
+            ok(f"[Init] MLX dispo mais modèle {args.yolo_model} est PyTorch. "
+               f"Utilisation de MPS.")
+
     if use_mlx:
         device = "mlx"
         STATE["device"] = "mlx"
         ok(f"[Init] Device: mlx (YOLO26 Metal GPU)")
-        # Resolve device for ReID (still uses MPS for DINOv2)
-        reid_device = resolve_device(args.device) if args.device != "auto" else "mps"
+        # DINOv2 (Re-ID) est PyTorch : il ne supporte PAS "mlx", seulement
+        # mps/cpu/cuda. resolve_device(for_pytorch=True) exclut mlx.
+        if args.device != "auto":
+            reid_device = resolve_device(args.device, for_pytorch=True)
+        else:
+            reid_device = resolve_device("auto", for_pytorch=True)
     else:
         device = resolve_device(args.device)
+        # Si le device résolu est "mlx" mais qu'on est ici (modèle PyTorch),
+        # on ne peut pas l'utiliser — on bascule sur le meilleur device PyTorch.
+        if device == "mlx":
+            device = resolve_device("auto", for_pytorch=True)
         STATE["device"] = device
         ok(f"[Init] Device: {device}")
         if device.startswith("cuda"):
@@ -229,6 +305,10 @@ def detection_loop(args):
         detector = CattleDetector(model_name=args.yolo_model, device=device)
     reid = CattleReID(model_name=args.dino_model, device=reid_device)
     db = EmbeddingDatabase(path=args.db, reid_engine=reid)
+    # Worker asynchrone : découple DINOv2 de la boucle vidéo pour garantir
+    # un FPS stable (le Re-ID ne bloque plus la détection).
+    reid_worker = ReIDWorker(reid)
+    ok(f"[ReIDWorker] Thread asynchrone démarré (decouplage DINOv2)")
 
     # Validation compatibilité dim
     dummy_crop = np.zeros((128, 128, 3), dtype=np.uint8)
@@ -333,7 +413,14 @@ def detection_loop(args):
             STATE["events"] = STATE["events"][:30]
             try:
                 old = detector
-                new_det = CattleDetector(model_name=d, device=old.device, half=old.half)
+                # Choisit le bon detecteur selon le type de fichier
+                is_mlx_model = d.endswith(".safetensors") or d.startswith("yolo26")
+                if is_mlx_model:
+                    new_det = CattleDetectorMLX(model_name=d, device="mlx")
+                else:
+                    # Convertit le device MLX en device PyTorch compatible (mps/cpu)
+                    pt_device = resolve_device("auto", for_pytorch=True)
+                    new_det = CattleDetector(model_name=d, device=pt_device, half=False)
                 detector = new_det
                 STATE["yolo_model_current"] = d
                 STATE["desired_yolo_model"] = None
@@ -469,8 +556,10 @@ def detection_loop(args):
                     reid_every = max(1, int(STATE.get("embed_every_current", 30)))
                     new_track_indices: list[int] = []     # nouveaux tracks
                     reembed_track_indices: list[int] = []  # tracks existants (EMA)
-                    valid_indices: list[int] = []
-                    valid_crops: list[np.ndarray] = []
+                    # Clé STABLE = track_id (int). det_idx change à chaque frame
+                    # et ne peut pas servir de clé pour le worker asynchrone.
+                    crops_to_submit: dict[int, np.ndarray] = {}  # {track_id: crop}
+                    det_idx_to_tid: dict[int, int] = {}
 
                     for det_idx, (box, tid, conf) in enumerate(zip(boxes, track_ids, confs)):
                         x1, y1, x2, y2 = map(int, box)
@@ -478,28 +567,41 @@ def detection_loop(args):
                         x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
                         if (x2 - x1) < 24 or (y2 - y1) < 24:
                             continue
+                        det_idx_to_tid[det_idx] = int(tid)
                         crop = frame[y1:y2, x1:x2]
-                        if int(tid) not in track_id_to_name:
+                        # "?" = en attente d'embedding (worker pas encore prêt).
+                        # On le traite comme un nouveau track pour le re-soumettre.
+                        existing = track_id_to_name.get(int(tid))
+                        if existing is None or existing == "?":
                             new_track_indices.append(det_idx)
-                            valid_indices.append(det_idx)
-                            valid_crops.append(crop)
+                            crops_to_submit[int(tid)] = crop
                         elif frame_idx % reid_every == 0:
                             reembed_track_indices.append(det_idx)
-                            valid_indices.append(det_idx)
-                            valid_crops.append(crop)
+                            crops_to_submit[int(tid)] = crop
 
-                    # Phase 2: UN seul forward DINOv2 sur tous les crops éligibles
-                    if valid_crops:
-                        embeddings = reid.get_embedding_batch(valid_crops)
+                    # Phase 2: soumission asynchrone + collecte des embeddings prêts.
+                    # Le worker calcule DINOv2 dans un thread séparé : la boucle
+                    # vidéo n'attend jamais le forward. Les crops non prêts cette
+                    # frame seront traités à la suivante.
+                    # emb_by_tid: {track_id: embedding} — clé stable cross-frames
+                    if reid_worker.has_failed():
+                        # Fallback synchrone si le worker a crashé
+                        if crops_to_submit:
+                            embeddings = reid.get_embedding_batch(
+                                list(crops_to_submit.values())
+                            )
+                        else:
+                            embeddings = []
+                        emb_by_tid: dict[int, np.ndarray] = {}
+                        for k, (tid, _) in enumerate(crops_to_submit.items()):
+                            e = embeddings[k] if k < len(embeddings) else None
+                            if e is not None and e.shape[0] == expected_dim:
+                                emb_by_tid[tid] = e
                     else:
-                        embeddings = []
-
-                    # Indexation rapide par det_idx
-                    emb_by_idx: dict[int, np.ndarray] = {}
-                    for k, di in enumerate(valid_indices):
-                        e = embeddings[k] if k < len(embeddings) else None
-                        if e is not None and e.shape[0] == expected_dim:
-                            emb_by_idx[di] = e
+                        # Soumet les crops au worker, clé = track_id (non-bloquant)
+                        reid_worker.submit_batch(crops_to_submit)
+                        # Récupère ce qui est prêt (non-bloquant, peut être vide)
+                        emb_by_tid = reid_worker.collect_ready()
 
                     # Phase 3: matching / EMA / annotation
                     for det_idx, (box, tid, conf) in enumerate(zip(boxes, track_ids, confs)):
@@ -508,9 +610,10 @@ def detection_loop(args):
                         x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
                         if (x2 - x1) < 24 or (y2 - y1) < 24:
                             continue
+                        tid_int = int(tid)
 
                         if det_idx in new_track_indices:
-                            emb = emb_by_idx.get(det_idx)
+                            emb = emb_by_tid.get(tid_int)
                             if emb is not None:
                                 in_loop_grace = (
                                     frame_idx - loop_detected_at_frame
@@ -526,10 +629,18 @@ def detection_loop(args):
                                 event = None
                                 if name is None:
                                     name = f"Boeuf_{len(db.animals) + 1:03d}"
-                                    db.add(name, emb)
+                                    # Identification de la race par analyse de robe (HSV).
+                                    # Instantané (<0.5ms), réutilise le crop courant.
+                                    crop = frame[y1:y2, x1:x2]
+                                    breed_result = classify_breed(crop)
+                                    breed_name = breed_result.get("breed", "Indéterminée")
+                                    breed_conf = breed_result.get("confidence", 0.0)
+                                    db.add(name, emb,
+                                           breed=breed_name,
+                                           breed_confidence=breed_conf)
                                     event = (
-                                        f"NEW  {name}  (sim_max={sim:.3f}, "
-                                        f"thr={eff_threshold:.2f})"
+                                        f"NEW  {name}  {breed_name} "
+                                        f"(sim_max={sim:.3f}, race={breed_conf:.0%})"
                                     )
                                 else:
                                     event = (
@@ -547,7 +658,7 @@ def detection_loop(args):
                                 track_id_to_name[int(tid)] = "?"
                                 STATE["_track_names"] = track_id_to_name
                         elif det_idx in reembed_track_indices:
-                            emb = emb_by_idx.get(det_idx)
+                            emb = emb_by_tid.get(tid_int)
                             if emb is not None:
                                 buf = track_emb_accum.setdefault(int(tid), [])
                                 buf.append(emb)
@@ -576,8 +687,13 @@ def detection_loop(args):
                             x1, y1, x2, y2, color,
                         )
 
-                        # Label
-                        label = f"{name}  {float(conf):.2f}"
+                        # Race stockée en DB (pour les animaux identifiés)
+                        animal_data = db.animals.get(name, {}) if name != "?" else {}
+                        breed_name = animal_data.get("breed") or "Indéterminée"
+                        breed_conf = animal_data.get("breed_confidence", 0)
+
+                        # Label avec race (compact)
+                        label = f"{name}  {breed_name}  {float(conf):.2f}"
                         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
                         ly1 = max(0, y1 - th - 10)
                         ly2 = ly1 + th + 10
@@ -588,6 +704,8 @@ def detection_loop(args):
                             "name": name,
                             "conf": float(conf),
                             "track_id": int(tid),
+                            "breed": breed_name,
+                            "breed_confidence": round(float(breed_conf), 2) if breed_conf else 0,
                         })
 
                     # Comportement (sur la dernière frame traitée)
@@ -610,8 +728,11 @@ def detection_loop(args):
         except Exception as e:
             err(f"[Crash] {type(e).__name__}: {e}")
             import traceback
-            traceback.print_exc()
-            STATE["events"].insert(0, f"CRASH: {type(e).__name__}")
+            tb = traceback.format_exc()
+            print(tb, flush=True)
+            # Garde le message d'erreur + dernière ligne du traceback pour debug
+            last_tb = tb.strip().splitlines()[-1] if tb else str(e)
+            STATE["events"].insert(0, f"CRASH: {type(e).__name__}: {str(e)[:80]} | {last_tb[:60]}")
             STATE["events"] = STATE["events"][:30]
             time.sleep(2)
             try:
