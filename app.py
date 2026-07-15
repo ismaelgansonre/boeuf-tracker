@@ -427,22 +427,28 @@ def breed_detail(breed_name):
 
 @app.route("/api/animals")
 def list_animals():
-    """Liste tous les animaux identifiés en DB (avec leur race)."""
-    # db est instancié dans le thread processor ; on le récupère via STATE
-    # ou on le recrée en lecture seule. Pour éviter une re-init, on utilise
-    # un accès différé via un module-level holder.
+    """Liste tous les animaux identifiés en DB (avec leur race + nom propre)."""
     from database import EmbeddingDatabase
+    from names import make_name_generator
     db = EmbeddingDatabase(path="cattle_db.pkl")
+    name_gen = make_name_generator(db)
     animals = []
     for name, data in db.animals.items():
         animals.append({
-            "name": name,
-            "breed": data.get("breed", "Indéterminée"),
+            "key": name,                     # Boeuf_001 (interne)
+            "name": name_gen.get(name),      # "Marguerite" (nom propre)
+            "breed": data.get("breed", "Indeterminee"),
             "breed_confidence": data.get("breed_confidence", 0),
+            "coat_swatch": data.get("coat_swatch", "#555555"),
+            "breeds_compat": data.get("breeds_compat", []),
             "count": data.get("count", 0),
             "first_seen": data.get("first_seen"),
         })
-    return jsonify({"animals": animals, "count": len(animals)})
+    return jsonify({
+        "animals": animals,
+        "count": len(animals),
+        "name_mapping": name_gen.all(),  # {Boeuf_001: Marguerite, ...}
+    })
 
 
 @app.route("/api/bench", methods=["GET"])

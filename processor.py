@@ -87,6 +87,7 @@ from reid import CattleReID
 from database import EmbeddingDatabase
 from reid_worker import ReIDWorker
 from breed import classify_breed
+from names import make_name_generator
 from state import STATE, color_for_name, reset_for_new_source
 from capture import open_capture, source_label
 
@@ -309,6 +310,10 @@ def detection_loop(args):
     # un FPS stable (le Re-ID ne bloque plus la détection).
     reid_worker = ReIDWorker(reid)
     ok(f"[ReIDWorker] Thread asynchrone démarré (decouplage DINOv2)")
+    # Générateur de noms propres (stable cross-session via first_seen)
+    name_gen = make_name_generator(db)
+    ok(f"[Names] {len(name_gen.all())} noms attribues à partir de la DB")
+    STATE["name_gen"] = name_gen
 
     # Validation compatibilité dim
     dummy_crop = np.zeros((128, 128, 3), dtype=np.uint8)
@@ -629,23 +634,37 @@ def detection_loop(args):
                                 event = None
                                 if name is None:
                                     name = f"Boeuf_{len(db.animals) + 1:03d}"
-                                    # Identification de la race par analyse de robe (HSV).
+                                    # Identification du robe-type par analyse HSV
+                                    # (breed.py → coat_type + breeds compatibles).
                                     # Instantané (<0.5ms), réutilise le crop courant.
                                     crop = frame[y1:y2, x1:x2]
                                     breed_result = classify_breed(crop)
-                                    breed_name = breed_result.get("breed", "Indéterminée")
+                                    coat_type = breed_result.get("coat_type", "Indeterminee")
                                     breed_conf = breed_result.get("confidence", 0.0)
                                     db.add(name, emb,
-                                           breed=breed_name,
-                                           breed_confidence=breed_conf)
+                                           breed=coat_type,
+                                           breed_confidence=breed_conf,
+                                           coat_swatch=breed_result.get("swatch"),
+                                           breeds_compat=[b["name"] for b in breed_result.get("breeds", [])])
+                                    # Met a jour le generateur de noms avec le nouveau bovin
+                                    name_gen.__init__(db.animals)
+                                    STATE["name_gen"] = name_gen
+                                    # Persiste la DB sur disque a chaque nouvel animal
+                                    # (pickle, ~1-2ms, garantit la stabilite cross-session)
+                                    try:
+                                        db.save()
+                                    except Exception as e:
+                                        warn(f"[DB] save failed: {e}")
+                                    proper_name = name_gen.get(name)
                                     event = (
-                                        f"NEW  {name}  {breed_name} "
-                                        f"(sim_max={sim:.3f}, race={breed_conf:.0%})"
+                                        f"NEW  {proper_name} ({name})  {coat_type} "
+                                        f"(sim_max={sim:.3f}, robe={breed_conf:.0%})"
                                     )
                                 else:
+                                    proper_name = name_gen.get(name)
                                     event = (
-                                        f"MATCH {name}  (sim={sim:.3f}, "
-                                        f"thr={eff_threshold:.2f})"
+                                        f"MATCH {proper_name} ({name})  "
+                                        f"(sim={sim:.3f}, thr={eff_threshold:.2f})"
                                     )
                                 track_id_to_name[int(tid)] = name
                                 track_emb_accum[int(tid)] = [emb]
@@ -689,11 +708,14 @@ def detection_loop(args):
 
                         # Race stockée en DB (pour les animaux identifiés)
                         animal_data = db.animals.get(name, {}) if name != "?" else {}
-                        breed_name = animal_data.get("breed") or "Indéterminée"
+                        breed_name = animal_data.get("breed") or "Indeterminee"
                         breed_conf = animal_data.get("breed_confidence", 0)
 
-                        # Label avec race (compact)
-                        label = f"{name}  {breed_name}  {float(conf):.2f}"
+                        # Nom propre (stable cross-session) via NameGenerator
+                        display_name = name_gen.get(name) if name != "?" else "?"
+
+                        # Label avec nom propre + race (compact)
+                        label = f"{display_name}  {breed_name}  {float(conf):.2f}"
                         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
                         ly1 = max(0, y1 - th - 10)
                         ly2 = ly1 + th + 10
@@ -701,7 +723,8 @@ def detection_loop(args):
                         cv2.putText(annotated, label, (x1, ly1 + th + 2),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
                         active.append({
-                            "name": name,
+                            "name": display_name,
+                            "key": name,  # la cle interne (Boeuf_001), pour debug
                             "conf": float(conf),
                             "track_id": int(tid),
                             "breed": breed_name,

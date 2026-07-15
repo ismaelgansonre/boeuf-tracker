@@ -209,13 +209,16 @@ class EmbeddingDatabase:
         return (w.w_dino * sim_d + w.w_hsv * sim_h + w.w_lbp * sim_l).astype(np.float32)
 
     def add(self, name: str, embedding: np.ndarray, breed: str = None,
-            breed_confidence: float = None) -> None:
+            breed_confidence: float = None,
+            coat_swatch: str = None, breeds_compat: list = None) -> None:
         self.animals[name] = {
             "embedding": np.asarray(embedding, dtype=np.float32).ravel(),
             "count": 1,
             "first_seen": datetime.now().isoformat(timespec="seconds"),
             "breed": breed,
             "breed_confidence": breed_confidence,
+            "coat_swatch": coat_swatch,
+            "breeds_compat": breeds_compat or [],
         }
         self._dirty = True
 
