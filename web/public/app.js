@@ -11,7 +11,7 @@ let pushInFlight = false;
 const btnTheme = $('btn-theme');
 function updateThemeIcon() {
     const t = document.documentElement.getAttribute('data-theme');
-    btnTheme.textContent = t === 'dark' ? '☀️' : '🌙';
+    btnTheme.textContent = t === 'dark' ? 'LIGHT' : 'DARK';
 }
 updateThemeIcon();
 btnTheme.addEventListener('click', () => {

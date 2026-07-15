@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🐄 Boeuf Tracker</title>
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐄</text></svg>">
+    <title>Boeuf Tracker</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>B</text></svg>">
     <link rel="stylesheet" href="/styles.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script>
@@ -17,7 +17,7 @@
     <!-- Topbar -->
     <header class="topbar">
         <div class="topbar-left">
-            <span class="logo">🐄 Boeuf Tracker</span>
+            <span class="logo">Boeuf Tracker</span>
         </div>
         <div class="topbar-meta" id="meta-bar">
             <span id="meta-source" class="meta-item">source: --</span>
@@ -29,7 +29,7 @@
             <span id="meta-frames" class="meta-item">frames: 0</span>
             <span id="meta-pending" class="meta-pending" style="display:none"></span>
         </div>
-        <button id="btn-theme" class="btn-icon" title="Basculer thème">🌙</button>
+        <button id="btn-theme" class="btn-icon theme-btn" title="Basculer theme">DARK</button>
         <button id="btn-dashboard" class="btn-icon" title="Ouvrir le dashboard">Analytics</button>
     </header>
 
@@ -121,7 +121,7 @@
                     </div>
                     <div class="setting-row setting-actions">
                         <span id="settings-status" class="status-text status-success"></span>
-                        <button id="btn-rematch" class="btn btn-sm btn-primary" title="Force la ré-identification">🔄 Re-match</button>
+                        <button id="btn-rematch" class="btn btn-sm btn-primary" title="Force la re-identification">Re-match</button>
                     </div>
                 </div>
             </div>
