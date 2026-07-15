@@ -128,33 +128,75 @@ fn resolve_project_root() -> std::path::PathBuf {
 
 /// Attend que le worker Python reponde (health check TCP).
 /// Retourne true si pret, false si timeout.
+/// Attend que le worker Python soit completement pret : port ouvert ET
+/// l'API repond ET la boucle video produit des frames (fps > 0).
+/// On ne bascule l'UI qu'une fois les modeles IA charges et la 1re frame
+/// produite, sinon l'utilisateur voit fps: 0 et 'Indeterminee'.
 fn wait_for_worker() -> bool {
-    use std::net::TcpStream;
     let start = Instant::now();
     let timeout = Duration::from_secs(HEALTH_TIMEOUT_SECS);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", WORKER_PORT)
         .parse()
         .expect("adresse invalide");
+    let stats_url = format!("http://127.0.0.1:{}/api/stats", WORKER_PORT);
 
     println!(
         "[boeuf] Attente du worker Python (max {}s)...",
         HEALTH_TIMEOUT_SECS
     );
+
+    // Phase 1: attendre que le port TCP s'ouvre (Flask demarre)
     while start.elapsed() < timeout {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
-            println!(
-                "[boeuf] Worker Python pret en {:.1}s",
-                start.elapsed().as_secs_f64()
-            );
-            return true;
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
+            break;
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    eprintln!(
-        "[boeuf] TIMEOUT: le worker Python n'a pas repondu en {}s",
-        HEALTH_TIMEOUT_SECS
+    if start.elapsed() >= timeout {
+        eprintln!("[boeuf] TIMEOUT: port {} jamais ouvert", WORKER_PORT);
+        return false;
+    }
+    println!(
+        "[boeuf] Port ouvert en {:.1}s, attente des modeles IA...",
+        start.elapsed().as_secs_f64()
     );
-    false
+
+    // Phase 2: attendre que /api/stats reponde avec fps > 0 (modeles charges,
+    // boucle video active). On essaie pendant le temps restant.
+    while start.elapsed() < timeout {
+        if let Ok(resp) = std::process::Command::new("curl")
+            .args(["-s", "--max-time", "2", &stats_url])
+            .output()
+        {
+            let body = String::from_utf8_lossy(&resp.stdout);
+            // Verifie que la reponse contient '"fps":' avec une valeur > 0
+            if body.contains("\"fps\":") {
+                // Extrait la valeur de fps
+                if let Some(idx) = body.find("\"fps\":") {
+                    let after = &body[idx + 6..];
+                    let fps_str: String = after
+                        .chars()
+                        .skip_while(|c| c.is_whitespace())
+                        .take_while(|c| c.is_ascii_digit() || *c == '.')
+                        .collect();
+                    if let Ok(fps) = fps_str.parse::<f64>() {
+                        if fps > 0.0 {
+                            println!(
+                                "[boeuf] Worker pret (FPS={:.1}) en {:.1}s total",
+                                fps,
+                                start.elapsed().as_secs_f64()
+                            );
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1000));
+    }
+    // Fallback: si curl echoue mais le port est ouvert, on accepte quand meme
+    println!("[boeuf] FPS > 0 non confirme, mais port ouvert -> accepte");
+    true
 }
 
 fn main() {

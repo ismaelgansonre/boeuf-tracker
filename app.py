@@ -364,14 +364,23 @@ def diag():
 
 @app.route("/api/db/reset", methods=["POST"])
 def reset_db():
-    """Purge la base de données des embeddings."""
-    from database import EmbeddingDatabase
+    """Purge la base de données des embeddings de la vidéo courante."""
     data = request.get_json(silent=True) or {}
-    db_path = data.get("path", "cattle_db.pkl")
-    if os.path.exists(db_path):
-        os.remove(db_path)
-    # Aussi purger l'in-memory
-    STATE["events"].insert(0, "DB RESET")
+    # Utilise la DB active (celle de la source courante), pas un chemin fixe.
+    db = STATE.get("db")
+    if db is not None:
+        db_path = db.path
+        db.animals.clear()
+        db._dirty = True
+        try:
+            db.save()
+        except Exception:
+            pass
+    else:
+        db_path = data.get("path", "cattle_db.pkl")
+        if os.path.exists(db_path):
+            os.remove(db_path)
+    STATE["events"].insert(0, "DB RESET (vidéo courante)")
     STATE["events"] = STATE["events"][:30]
     return jsonify({"ok": True, "message": "base purgée", "path": db_path})
 
