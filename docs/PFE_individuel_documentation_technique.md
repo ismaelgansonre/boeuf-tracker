@@ -8,7 +8,7 @@
 
 | | |
 |---|---|
-| **Étudiant** | Ismael Gansonre |
+| **Étudiant** | (anonymisé) |
 | **Programme** | Baccalauréat en Génie Électrique |
 | **Cours** | GEI1052 — Activités de synthèse |
 | **Session** | Hiver 2026 |
@@ -319,4 +319,4 @@ boeuf-tracker/
 
 ---
 
-*PFE Individuel — Documentation Technique — Ismael Gansonre — Hiver 2026*
+*PFE Individuel — Documentation Technique — Hiver 2026*

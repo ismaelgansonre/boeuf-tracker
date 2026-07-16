@@ -50,9 +50,11 @@ app.all("/api/*", (c) => {
 });
 
 app.all("/video_feed", (c) => {
-  const qs = c.req.raw.url.split("?")[1] ?? "";
-  const path = "/video_feed" + (qs ? `?${qs}` : "");
-  return proxyToPython(path, { headers: c.req.raw.headers });
+  return proxyToPython("/video_feed", {
+    method: c.req.method,
+    headers: c.req.raw.headers,
+    body: c.req.method !== "GET" && c.req.method !== "HEAD" ? c.req.raw.body : undefined,
+  });
 });
 
 // ─── Fichiers statiques (UI) ────────────────────────────────────────────

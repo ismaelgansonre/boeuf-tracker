@@ -172,12 +172,12 @@
             <!-- KPIs -->
             <div class="kpi-grid">
                 <div class="kpi-card">
-                    <div class="kpi-label">Animaux uniques</div>
+                    <div class="kpi-label">Bovins identifiés</div>
                     <div class="kpi-value" id="kpi-unique">-</div>
                 </div>
                 <div class="kpi-card">
-                    <div class="kpi-label">Detections</div>
-                    <div class="kpi-value" id="kpi-detections">-</div>
+                    <div class="kpi-label">Bovins visibles</div>
+                    <div class="kpi-value" id="kpi-visible">-</div>
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-label">FPS moyen</div>
@@ -210,18 +210,28 @@
 
             <!-- Heatmap spatiale -->
             <div class="card dashboard-card">
-                <h3 class="card-title">Heatmap spatiale (positions des animaux)</h3>
+                <h3 class="card-title">Densité spatiale</h3>
                 <p class="card-subtitle">
-                    Grille 20x20 normalisee (0 = coin haut-gauche, 1 = coin bas-droit).
-                    Plus un point est chaud, plus les bovins s'y sont arretes.
+                    Régions de l'image où les bovins s'attardent. Plus la zone est chaude, plus ils y passent de temps.
                 </p>
                 <div class="heatmap-wrapper">
-                    <canvas id="heatmap" width="400" height="400"></canvas>
-                    <div class="heatmap-legend">
-                        <div class="heatmap-legend-bar"></div>
-                        <div class="heatmap-legend-labels">
-                            <span>0</span><span>50</span><span>100+</span>
+                    <div class="heatmap-frame">
+                        <div class="heatmap-axis-y">
+                            <span>Haut</span>
+                            <span>Milieu</span>
+                            <span>Bas</span>
                         </div>
+                        <canvas id="heatmap"></canvas>
+                    </div>
+                    <div class="heatmap-axis-x">
+                        <span>Gauche</span>
+                        <span>Centre</span>
+                        <span>Droite</span>
+                    </div>
+                    <div class="heatmap-legend">
+                        <span class="heatmap-legend-label">Faible</span>
+                        <div class="heatmap-legend-bar"></div>
+                        <span class="heatmap-legend-label">Élevé</span>
                     </div>
                 </div>
             </div>

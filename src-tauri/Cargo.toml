@@ -2,7 +2,7 @@
 name = "boeuf-tracker"
 version = "2.0.0"
 description = "Cattle identification via YOLOv11 + DINOv2 Re-ID"
-authors = ["Ismael Gansonre"]
+authors = ["Boeuf Tracker Contributors"]
 edition = "2021"
 
 [build-dependencies]

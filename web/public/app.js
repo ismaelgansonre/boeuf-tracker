@@ -38,10 +38,12 @@ const BEHAVIOR_BADGES = {
 };
 
 // ─── Polling stats (1s) ─────────────────────────────────────────
+let lastStats = null;
 async function refreshStats() {
     try {
         const res = await fetch('/api/stats');
         const data = await res.json();
+        lastStats = data;
 
         const sourceLabel = data.source_label || data.source || '--';
         $('meta-source').textContent = 'source: ' + sourceLabel;
@@ -334,7 +336,7 @@ refreshStats();
 // ─── Polling JPEG du flux vidéo (~25 fps) ───────────────────────
 const streamImg = $('stream');
 let streamTimer = null;
-function refreshStream() { streamImg.src = '/video_feed?t=' + Date.now(); }
+function refreshStream() {  }
 streamImg.addEventListener('load', () => { clearTimeout(streamTimer); streamTimer = setTimeout(refreshStream, 40); });
 streamImg.addEventListener('error', () => { clearTimeout(streamTimer); streamTimer = setTimeout(refreshStream, 500); });
 refreshStream();
@@ -444,66 +446,109 @@ const actChart = new Chart(actCtx, {
     }
 });
 
-// ── Heatmap en Canvas natif ──
+// ── Heatmap en Canvas natif (rendu smooth, type "kernel density") ──
 const heatCanvas = $('heatmap');
 const heatCtx = heatCanvas.getContext('2d');
+
+// Brusch du gradient de chaleur : couleur pour une intensité t∈[0,1]
+function heatColor(t) {
+    // Palette pro : vert agri → ambre → rouge brique
+    // 3 stops avec interpolation
+    const stops = [
+        { t: 0.00, c: [22, 163, 74] },     // vert agri
+        { t: 0.50, c: [217, 119, 6] },     // ambre terre
+        { t: 1.00, c: [225, 29, 72] },     // rouge brique
+    ];
+    const clamped = Math.max(0, Math.min(1, t));
+    for (let i = 0; i < stops.length - 1; i++) {
+        const a = stops[i], b = stops[i + 1];
+        if (clamped >= a.t && clamped <= b.t) {
+            const k = (clamped - a.t) / (b.t - a.t);
+            return [
+                Math.round(a.c[0] + (b.c[0] - a.c[0]) * k),
+                Math.round(a.c[1] + (b.c[1] - a.c[1]) * k),
+                Math.round(a.c[2] + (b.c[2] - a.c[2]) * k),
+            ];
+        }
+    }
+    return stops[stops.length - 1].c;
+}
+
 function drawHeatmap(heatmapData) {
-    const size = heatmapData.grid_size;
+    const size = heatmapData.grid_size || 20;
     const cells = heatmapData.global || [];
-    const total = heatmapData.total_samples || 1;
-    const cellPx = heatCanvas.width / size;
+    const total = heatmapData.total_samples || 0;
 
-    // Resize haute résolution pour écrans retina
+    // 1) Resize haute résolution (Retina)
+    const cssSize = heatCanvas.clientWidth || 400;
     const dpr = window.devicePixelRatio || 1;
-    heatCanvas.width = 400 * dpr;
-    heatCanvas.height = 400 * dpr;
-    heatCanvas.style.width = '400px';
-    heatCanvas.style.height = '400px';
-    heatCtx.scale(dpr, dpr);
+    const W = cssSize * dpr;
+    const H = cssSize * dpr;
+    if (heatCanvas.width !== W || heatCanvas.height !== H) {
+        heatCanvas.width = W;
+        heatCanvas.height = H;
+    }
+    heatCtx.setTransform(1, 0, 0, 1, 0, 0);
+    heatCtx.clearRect(0, 0, W, H);
 
-    // Fond
-    heatCtx.fillStyle = '#0f1410';
-    heatCtx.fillRect(0, 0, heatCanvas.width / dpr, heatCanvas.height / dpr);
+    // 2) Fond neutre (couleur du bg-input côté CSS)
+    const bg = getComputedStyle(document.documentElement)
+        .getPropertyValue('--bg-input').trim() || '#131815';
+    heatCtx.fillStyle = bg;
+    heatCtx.fillRect(0, 0, W, H);
 
-    // Cellules
+    if (total === 0 || cells.length === 0) {
+        drawHeatmapEmpty();
+        return;
+    }
+
+    // 3) Calcul du max pour normalisation
     let maxCount = 0;
     cells.forEach(c => { if (c.count > maxCount) maxCount = c.count; });
     if (maxCount === 0) maxCount = 1;
 
+    // 4) Rendu : kernel gaussien smooth pour chaque cellule
+    // On dessine chaque cellule comme un cercle flou (radial gradient).
+    // Le blend 'lighter' additionne les intensités.
+    heatCtx.globalCompositeOperation = 'lighter';
+    const cellPx = W / size;
+    const radius = cellPx * 2.2;   // influence ~2 cellules
+
     cells.forEach(c => {
         const intensity = c.count / maxCount;
-        // Vert → Jaune → Rouge
-        let r, g, b;
-        if (intensity < 0.5) {
-            // vert (0.4) → ambre (0.6)
-            const t = intensity * 2;
-            r = Math.round(22 + (217 - 22) * t);
-            g = Math.round(163 + (119 - 163) * t);
-            b = Math.round(74 + (6 - 74) * t);
-        } else {
-            // ambre (0.5) → rouge (1.0)
-            const t = (intensity - 0.5) * 2;
-            r = Math.round(217 + (239 - 217) * t);
-            g = Math.round(119 + (68 - 119) * t);
-            b = Math.round(6 + (68 - 6) * t);
-        }
-        heatCtx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.3 + intensity * 0.7})`;
-        heatCtx.fillRect(c.x * cellPx, c.y * cellPx, cellPx, cellPx);
+        // Centre du cercle (dans la cellule)
+        const cx = (c.x + 0.5) * cellPx;
+        const cy = (c.y + 0.5) * cellPx;
+        const [r, g, b] = heatColor(intensity);
+        const alpha = 0.18 + 0.55 * intensity;
+
+        const grad = heatCtx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+        grad.addColorStop(0,    `rgba(${r},${g},${b},${alpha})`);
+        grad.addColorStop(0.5,  `rgba(${r},${g},${b},${alpha * 0.35})`);
+        grad.addColorStop(1,    `rgba(${r},${g},${b},0)`);
+        heatCtx.fillStyle = grad;
+        heatCtx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
     });
 
-    // Grille subtile
-    heatCtx.strokeStyle = 'rgba(255,255,255,0.05)';
+    heatCtx.globalCompositeOperation = 'source-over';
+
+    // 5) Axes discrets au centre (subtil)
+    const axisColor = 'rgba(255,255,255,0.06)';
+    heatCtx.strokeStyle = axisColor;
     heatCtx.lineWidth = 1;
-    for (let i = 0; i <= size; i++) {
-        heatCtx.beginPath();
-        heatCtx.moveTo(i * cellPx, 0);
-        heatCtx.lineTo(i * cellPx, 400);
-        heatCtx.stroke();
-        heatCtx.beginPath();
-        heatCtx.moveTo(0, i * cellPx);
-        heatCtx.lineTo(400, i * cellPx);
-        heatCtx.stroke();
-    }
+    heatCtx.beginPath();
+    heatCtx.moveTo(W / 2, 0); heatCtx.lineTo(W / 2, H);
+    heatCtx.moveTo(0, H / 2); heatCtx.lineTo(W, H / 2);
+    heatCtx.stroke();
+}
+
+function drawHeatmapEmpty() {
+    const W = heatCanvas.width, H = heatCanvas.height;
+    heatCtx.fillStyle = 'rgba(255,255,255,0.04)';
+    heatCtx.font = `${Math.round(W * 0.05)}px var(--font-mono, monospace)`;
+    heatCtx.textAlign = 'center';
+    heatCtx.textBaseline = 'middle';
+    heatCtx.fillText('Pas encore de données', W / 2, H / 2);
 }
 
 // ── Timeline avec filtre ──
@@ -549,7 +594,9 @@ async function refreshDashboard() {
 
         // KPIs
         $('kpi-unique').textContent = d.unique_animals ?? 0;
-        $('kpi-detections').textContent = d.detection_count ?? 0;
+        // Comptage en temps réel (cache de la dernière réponse /api/stats)
+        const visibleNow = (lastStats && lastStats.active) ? lastStats.active.length : 0;
+        $('kpi-visible').textContent = visibleNow;
         const recentFps = d.fps_history.slice(-10).map(p => p.fps);
         const avgFps = recentFps.length
             ? (recentFps.reduce((a, b) => a + b, 0) / recentFps.length).toFixed(1)
@@ -600,6 +647,7 @@ async function refreshDashboard() {
     }
 }
 setInterval(() => { if (dashPanel.classList.contains('open')) refreshDashboard(); }, 3000);
+window.addEventListener('resize', () => { if (dashPanel.classList.contains('open')) refreshDashboard(); });
 
 // ════════════════════════════════════════════════════════════════════════
 // PANNEAU STATISTIQUES (profils par bovin)
@@ -607,7 +655,7 @@ setInterval(() => { if (dashPanel.classList.contains('open')) refreshDashboard()
 const statsPanel = $('stats-panel');
 $('btn-stats').addEventListener('click', () => {
     statsPanel.classList.add('open');
-    refreshStats();
+    refreshProfiles();
 });
 $('btn-stats-close').addEventListener('click', () => statsPanel.classList.remove('open'));
 
@@ -628,7 +676,7 @@ const ACT_COLORS = {
 function behaviorLabel(k) { return BEHAVIOR_LABELS[k] || k; }
 function actColor(k) { return ACT_COLORS[k] || '#64748b'; }
 
-async function refreshStats() {
+async function refreshProfiles() {
     try {
         const res = await fetch('/api/profiles');
         const d = await res.json();
@@ -697,4 +745,4 @@ async function refreshStats() {
         console.error('stats refresh error:', e);
     }
 }
-setInterval(() => { if (statsPanel.classList.contains('open')) refreshStats(); }, 5000);
+setInterval(() => { if (statsPanel.classList.contains('open')) refreshProfiles(); }, 5000);

@@ -17,6 +17,7 @@ import os
 
 from flask import Flask, Response, jsonify, render_template, request, send_from_directory
 from werkzeug.utils import secure_filename
+import logging
 
 from state import STATE, NumpyJSONProvider
 from processor import start_detection_thread, resolve_device, _mlx_available
@@ -746,6 +747,10 @@ def main():
         ],
     )
     start_detection_thread(args)
+    # Coupe le spam du access-log werkzeug (sinon le polling /video_feed a ~25 Hz
+    # inonde la console : "GET /video_feed?t=... HTTP/1.1 200 -" a chaque frame).
+    # On garde ERROR pour voir passer les vraies erreurs serveur.
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
     app.run(host=args.host, port=args.port, threaded=True, debug=False, use_reloader=False)
 
 

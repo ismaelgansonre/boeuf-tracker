@@ -6,7 +6,7 @@
 
 | | |
 |---|---|
-| **Étudiant** | Ismael Gansonre |
+| **Étudiant** | (anonymisé) |
 | **Programme** | Baccalauréat en Génie Électrique |
 | **Cours** | GEI1052 — Activités de synthèse |
 | **Professeur** | — |
@@ -255,4 +255,4 @@ Ce projet a permis de développer un système complet de surveillance bovine en 
 
 ---
 
-*PFE Individuel — Rapport Final — Ismael Gansonre — Baccalauréat en Génie Électrique — Hiver 2026*
+*PFE Individuel — Rapport Final — Baccalauréat en Génie Électrique — Hiver 2026*
