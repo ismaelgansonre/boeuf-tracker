@@ -469,14 +469,14 @@ refreshStats();
 const streamImg = $('stream');
 let streamTimer = null;
 function refreshStream() {
-    
+    streamImg.src = `/video_feed?t=${Date.now()}`;
 }
 streamImg.addEventListener('load', () => {
     clearTimeout(streamTimer);
-    //streamTimer = setTimeout(refreshStream, 40);   // ~25 fps
+    streamTimer = setTimeout(refreshStream, 40);   // ~25 fps
 });
 streamImg.addEventListener('error', () => {
     clearTimeout(streamTimer);
-    //streamTimer = setTimeout(refreshStream, 500);  // back-off si erreur
+    streamTimer = setTimeout(refreshStream, 500);  // back-off si erreur
 });
 refreshStream();

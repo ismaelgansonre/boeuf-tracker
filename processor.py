@@ -10,10 +10,15 @@ Optimisations:
 - Numba JIT sur le calcul de comportement (boucle Python serrée).
 - Batcher l'embedding DINOv2 via reid.get_embedding_batch() pour tous les
   nouveaux tracks d'une frame en UN seul forward.
+- JPEG encoding dans un ThreadPoolExecutor (ne bloque pas la boucle IA).
+- Skip frames adaptatif : si FPS < cible, on saute des frames dynamiquement.
+- Copy-on-write de la frame : pas de copy() si aucune détection cette frame.
 """
+# Use new OOP structure
 import os
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import cv2
@@ -35,7 +40,7 @@ except Exception:
     # fallback (console ne dépend de personne ici). On prévient explicitement
     # que les JIT sont désactivées pour que la dégradation de perf soit visible.
     try:
-        from console import warn as _warn_fallback
+        from utils.console import warn as _warn_fallback
         _warn_fallback(
             "[Numba] numba non installé — _total_displacement et "
             "_classify_behavior tournent en Python pur (×5-10 plus lent). "
@@ -163,6 +168,9 @@ def analyze_behavior(boxes, track_ids, t_now, frame_shape=None):
         dt = max(pts[-1][2] - pts[0][2], 1e-3)
         speed = dist / dt
 
+        # Vitesse normalisée par la taille du bovin (plus stable entre plans)
+        rel_speed = speed / max((bw * bh) ** 0.5, 1)
+
         # Displacement cumulé (JIT) + classification (JIT)
         pts_arr = np.asarray(pts, dtype=np.float32)
         total_disp = _total_displacement(pts_arr[:, 0], pts_arr[:, 1])
@@ -171,12 +179,25 @@ def analyze_behavior(boxes, track_ids, t_now, frame_shape=None):
 
         action_code = _classify_behavior(float(speed), float(aspect),
                                          float(rel_y), float(immobile_dur))
-        action = _BEHAVIOR_LABELS[action_code]
+
+        # Lissage temporel : historique sur 5 frames, vote majoritaire
+        BEHAVIOR_HISTORY_LEN = 5
+        beh_hist = STATE["_track_behavior_hist"].setdefault(int(tid), [])
+        beh_hist.append(action_code)
+        if len(beh_hist) > BEHAVIOR_HISTORY_LEN:
+            beh_hist.pop(0)
+        # Vote majoritaire
+        smoothed_code = max(set(beh_hist), key=beh_hist.count)
+        action = _BEHAVIOR_LABELS[smoothed_code]
+
+        # Debug : décommenter pour tuner les seuils
+        # print(f"[BEH] {STATE.get('_track_names', {}).get(int(tid), '?')} speed={speed:.1f} rel={rel_speed:.3f} aspect={aspect:.2f} → {action}")
 
         behaviors.append({
             "name": STATE.get("_track_names", {}).get(int(tid), "?"),
             "action": action,
             "speed": round(float(speed), 1),
+            "rel_speed": round(float(rel_speed), 3),  # vitesse normalisée par taille
             "track_id": int(tid),
             "aspect": round(float(aspect), 2),
         })
@@ -409,6 +430,19 @@ def detection_loop(args):
     fps_smooth = 0.0
     frame_idx = 0
 
+    # ThreadPool pour l'encodage JPEG (ne bloque pas la boucle IA)
+    _jpeg_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jpeg_encode")
+    _pending_jpeg = None  # Future du dernier encodage en cours
+
+    # Skip adaptatif : on ajuste dynamiquement pour tenir le temps réel.
+    # Cible FPS = 25. Si fps_smooth < 20 pendant 3 frames consecutives,
+    # on augmente skip_frames ; si > 28 pendant 5 frames, on le reduit.
+    _target_fps = 25
+    _low_fps_streak = 0
+    _high_fps_streak = 0
+    _current_skip = int(getattr(args, "skip_frames", 0))
+    _max_skip = max(0, int(getattr(args, "skip_frames", 4)))
+
     # Anti-double-comptage sur vidéo en boucle
     prev_cap_pos: int = -1
     loop_detected_at_frame: int = -10**9  # frame_idx du dernier rebobinage
@@ -620,15 +654,22 @@ def detection_loop(args):
                     if cur_pos > 0:
                         prev_cap_pos = cur_pos
 
-                # Skip frames pour économie GPU
-                if args.skip_frames > 0 and frame_idx % (args.skip_frames + 1) != 0:
+                # Skip frames : dynamique (_current_skip) cadré par static (_max_skip)
+                effective_skip = min(_current_skip, _max_skip)
+                if effective_skip > 0 and frame_idx % (effective_skip + 1) != 0:
                     STATE["frame_count"] = frame_idx
                     frame_idx += 1
                     continue
 
                 # Détection + tracking + segmentation
                 result = detector.detect(frame, persist=True, conf=args.conf, imgsz=args.imgsz)
-                annotated = frame.copy()
+                has_detections = (
+                    result.boxes is not None
+                    and result.boxes.id is not None
+                    and len(result.boxes.id) > 0
+                )
+                # Copy-on-write : on ne copy la frame que si nécessaire pour l'annotation
+                annotated = frame.copy() if has_detections else None
                 active = []
 
                 if result.boxes is not None and result.boxes.id is not None:
@@ -857,19 +898,52 @@ def detection_loop(args):
                     # Comportement (sur la dernière frame traitée)
                     STATE["behavior"] = analyze_behavior(boxes, track_ids, time.time(), frame.shape)
 
-                # Encodage JPEG
-                enc_ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                if enc_ok:
-                    with STATE["frame_lock"]:
-                        STATE["frame_jpg"] = buf.tobytes()
-                        STATE["active_animals"] = active
+                # Encodage JPEG dans le thread pool (n'attend jamais la boucle IA)
+                # On passe la frame à encoder (copie légère si pas encore fait)
+                _pending_jpeg = _jpeg_executor.submit(
+                    lambda f: cv2.imencode(".jpg", f if f is not None else frame,
+                                          [cv2.IMWRITE_JPEG_QUALITY, 75]),
+                    annotated if annotated is not None else frame
+                )
 
                 elapsed = time.time() - t0
                 fps_inst = 1.0 / max(elapsed, 1e-6)
                 fps_smooth = 0.9 * fps_smooth + 0.1 * fps_inst if fps_smooth else fps_inst
                 STATE["fps"] = fps_smooth
                 STATE["frame_count"] = frame_idx
+
+                # Skip adaptatif : on rattrape le temps réel si nécessaire
+                if fps_smooth > 0:
+                    if fps_smooth < _target_fps - 5:
+                        _low_fps_streak += 1
+                        _high_fps_streak = 0
+                        if _low_fps_streak >= 3 and _current_skip < 4:
+                            _current_skip += 1
+                            _low_fps_streak = 0
+                            STATE["events"].insert(0, f"SKIP +1 -> {_current_skip}")
+                            STATE["events"] = STATE["events"][:30]
+                    elif fps_smooth > _target_fps + 3:
+                        _high_fps_streak += 1
+                        _low_fps_streak = 0
+                        if _high_fps_streak >= 5 and _current_skip > 0:
+                            _current_skip -= 1
+                            _high_fps_streak = 0
+                            STATE["events"].insert(0, f"SKIP -1 -> {_current_skip}")
+                            STATE["events"] = STATE["events"][:30]
+
                 frame_idx += 1
+
+                # Récupère le résultat de l'encodage précédent (non-bloquant)
+                if _pending_jpeg is not None and _pending_jpeg.done():
+                    try:
+                        enc_ok, buf = _pending_jpeg.result()
+                        if enc_ok:
+                            with STATE["frame_lock"]:
+                                STATE["frame_jpg"] = buf.tobytes()
+                                STATE["active_animals"] = active
+                    except Exception as e:
+                        warn(f"[JPEG] encode failed: {e}")
+                    _pending_jpeg = None
 
         except Exception as e:
             err(f"[Crash] {type(e).__name__}: {e}")

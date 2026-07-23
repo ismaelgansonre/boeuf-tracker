@@ -14,9 +14,10 @@ ET
 CattleDetectorMLX: YOLO26 sur MLX (Apple Metal GPU) avec tracking ByteTrack natif.
 YOLO26 MLX est ~2.6× plus rapide que YOLO11s sur PyTorch MPS pour Apple Silicon M1/M2/M3/M4.
 """
-import numpy as np
-import torch
-from ultralytics import YOLO
+# Backward compatibility - imports from new structure
+from core.detector import CattleDetector, CattleDetectorMLX
+
+__all__ = ["CattleDetector", "CattleDetectorMLX"]
 
 from console import info, ok, warn
 

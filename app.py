@@ -19,12 +19,13 @@ from flask import Flask, Response, jsonify, render_template, request, send_from_
 from werkzeug.utils import secure_filename
 import logging
 
-from state import STATE, NumpyJSONProvider
-from processor import start_detection_thread, resolve_device, _mlx_available
-from console import banner as log_banner, info, ok, warn, err
+# Use new OOP structure
+from utils.state import STATE
+from utils.console import banner, info, ok, warn, err
+from core.processor import start_detection_thread, resolve_device, _mlx_available
+from config import UPLOADS_DIR
 
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+UPLOAD_DIR = UPLOADS_DIR
 
 
 def _pick_default_source() -> str:

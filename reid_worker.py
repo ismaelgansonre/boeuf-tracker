@@ -1,7 +1,8 @@
 """
-reid_worker.py
---------------
-Thread worker qui découple le calcul d'embeddings DINOv2 de la boucle vidéo.
+# Backward compatibility - imports from new structure
+from utils.reid_worker import ReIDWorker
+
+__all__ = ["ReIDWorker"]
 
 PROBLÈME
 --------

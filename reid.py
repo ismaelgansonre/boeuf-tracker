@@ -1,7 +1,8 @@
 """
-reid.py
--------
-Extraction d'embeddings pour la ré-identification de bovins.
+# Backward compatibility - imports from new structure
+from core.reid import CattleReID
+
+__all__ = ["CattleReID"]
 
 Combine TROIS signaux complémentaires:
 

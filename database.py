@@ -1,7 +1,8 @@
 """
-database.py
------------
-Stocke et persiste les embeddings des bovins connus.
+# Backward compatibility - imports from new structure
+from core.database import EmbeddingDatabase
+
+__all__ = ["EmbeddingDatabase"]
 Format: pickle avec {nom: {embedding: np.array, count: int, first_seen: str}}
 
 Optimisations:

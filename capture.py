@@ -1,7 +1,8 @@
 """
-capture.py
-----------
-Helpers pour ouvrir une source vidéo avec le bon backend et basculer
+# Backward compatibility - imports from new structure
+from core.capture import CaptureManager, open_capture, read_with_recovery, source_label
+
+__all__ = ["CaptureManager", "open_capture", "read_with_recovery", "source_label"]
 entre webcam / fichier / flux RTSP à chaud.
 """
 import time

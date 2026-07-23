@@ -1,7 +1,8 @@
 """
-names.py
----------
-Generateur de noms propres pour les bovins identifies.
+# Backward compatibility - imports from new structure
+from utils.names import NameGenerator, GlobalCounter, get_counter, get_name_generator, next_bovin_key, make_name_generator
+
+__all__ = ["NameGenerator", "GlobalCounter", "get_counter", "get_name_generator", "next_bovin_key", "make_name_generator", "NAME_POOL"]
 
 Stratégie de stabilité cross-session :
   1. Le nom d'un bovin est determiné par sa CLE dans cattle_db.pkl (Boeuf_001,

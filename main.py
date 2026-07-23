@@ -16,9 +16,15 @@ import cv2
 import numpy as np
 import torch
 
-from detector import CattleDetector
-from reid import CattleReID
-from database import EmbeddingDatabase
+# Use new OOP structure
+from core.detector import CattleDetector
+from core.reid import CattleReID
+from core.database import EmbeddingDatabase
+from core.capture import CaptureManager
+from models.breed import classify_breed
+from utils.names import get_name_generator, next_bovin_key
+from utils.console import banner, info, ok, err
+from utils.state import color_for_name
 
 
 def parse_args():

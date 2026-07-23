@@ -1,7 +1,8 @@
 """
-breed.py
---------
-Identification de la race bovine par SigLIP-2 zero-shot (principal) + HSV (fallback).
+# Backward compatibility - imports from new structure
+from models.breed import BreedClassifier, BREEDS, classify_breed, get_clip_engine
+
+__all__ = ["BreedClassifier", "BREEDS", "classify_breed", "get_clip_engine"]
 
 APPROCHE
 --------

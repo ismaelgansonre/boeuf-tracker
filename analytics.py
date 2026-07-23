@@ -1,7 +1,8 @@
 """
-analytics.py
-------------
-Accumulation de donnees pour le dashboard.
+# Backward compatibility - imports from new structure
+from models.analytics import Analytics, DetectionSample, get_analytics, init_analytics
+
+__all__ = ["Analytics", "DetectionSample", "get_analytics", "init_analytics"]
 
 Donnees collectees (toutes cross-session via web/data/history.json) :
 1. **Historique FPS** : echantillonne toutes les 2s pour la courbe

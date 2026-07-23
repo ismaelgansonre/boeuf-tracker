@@ -1,7 +1,8 @@
 """
-console.py
-----------
-Logger console propre, horodaté, coloré. Utilisé dans tout le projet
+# Backward compatibility - imports from new structure
+from utils.console import Logger, log, info, ok, warn, err, dbg, evt, boot, loop, banner
+
+__all__ = ["Logger", "log", "info", "ok", "warn", "err", "dbg", "evt", "boot", "loop", "banner"] Utilisé dans tout le projet
 pour remplacer les print() bruts.
 
 Usage:

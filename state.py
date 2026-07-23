@@ -1,7 +1,8 @@
 """
-state.py
---------
-État global partagé entre le thread de détection et les routes Flask.
+# Backward compatibility - imports from new structure
+from utils.state import AppState, STATE, color_for_name, reset_for_new_source
+
+__all__ = ["AppState", "STATE", "color_for_name", "reset_for_new_source", "NumpyJSONProvider"]
 Inclut un JSON encoder numpy-safe.
 """
 import threading
@@ -58,6 +59,7 @@ STATE = {
     "events": [],
     "behavior": [],
     "track_history": {},
+    "_track_behavior_hist": {},  # {track_id: [action_codes]} — lissage temporel
     "source": "",
     "source_label": "",
     "current_source_path": None,
