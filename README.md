@@ -1,17 +1,17 @@
-# Boeuf Tracker — YOLOv11 + DINOv2 + Re-ID
+# Boeuf Tracker — YOLOv11 + MegaDescriptor + Re-ID
 
-Système de reconnaissance individuelle de bovins:
-- **YOLOv11** (Ultralytics) → détection + tracking intra-vidéo
-- **DINOv2** (Meta) → extraction d'empreinte visuelle (embedding)
+Système de reconnaissance individuelle de bovins :
+- **YOLOv11-seg** (Ultralytics) → détection + segmentation + tracking intra-vidéo (ByteTrack)
+- **MegaDescriptor** (WildlifeDatasets) → embedding spécialisé re-ID animale (SOTA 2024, bat DINOv2/CLIP)
+- **HSV + LBP** → fusion couleur/texture pelage
 - **Cosine similarity** → reconnaissance cross-vidéo
 - Base persistante (pickle) → les bovins identifiés hier sont reconnus aujourd'hui
 
 ## Installation
 
-```powershell
-cd C:\Users\Ismae\.minimax-agent\projects\boeuf-tracker
+```bash
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+source .venv/bin/activate       # Windows: .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
@@ -49,7 +49,7 @@ python main.py --source rtsp://192.168.1.10:8554/stream  # flux (futur Pi)
 | `--threshold` | 0.55 | Seuil cosine pour Re-ID (0.4 permissif, 0.7 strict) |
 | `--db` | `cattle_db.pkl` | Fichier de base d'embeddings |
 | `--yolo-model` | `yolo11n.pt` | Modèle YOLO (`yolo11s/m/l/x.pt` pour plus de précision) |
-| `--dino-model` | `facebook/dinov2-small` | Modèle DINOv2 (`-base` ou `-large` plus précis) |
+| `--reid-model` | `hf-hub:BVRA/MegaDescriptor-T-224` | Backbone re-ID (timm/HF). `-S/-B-224` ou `-L-384` = plus précis, plus lent. |
 | `--conf` | 0.4 | Confiance minimale YOLO |
 
 ### Contrôles en cours d'exécution
@@ -77,12 +77,16 @@ python main.py --source rtsp://192.168.1.10:8554/stream  # flux (futur Pi)
 
 ```
 boeuf-tracker/
-├── main.py         # point d'entrée, boucle vidéo
-├── detector.py     # YOLOv11 wrapper
-├── reid.py         # DINOv2 embeddings
-├── database.py     # stockage pickle
-├── requirements.txt
-└── cattle_db.pkl   # (généré après 1er run)
+├── main.py         # point d'entrée CLI, boucle vidéo
+├── app.py          # serveur Flask (MJPEG + API)
+├── detector.py     # YOLOv11-seg wrapper (PyTorch/MLX)
+├── reid.py         # MegaDescriptor + HSV + LBP
+├── behavior.py     # classifieur comportement (extrait de processor.py)
+├── database.py     # stockage pickle vectorisé
+├── processor.py    # boucle principale + orchestration
+├── tests/          # pytest
+├── samples/        # vidéos de test (gitignorées)
+└── cattle_db_*.pkl # (générés au 1er run, gitignorés)
 ```
 
 ## Prochaine étape: Raspberry Pi

@@ -41,6 +41,9 @@ uploads/*.webm
 .DS_Store
 uploads/
 
+# Fichiers temporaires Office (verrous Word/Excel)
+~$*
+
 # ZCode CLI cache
 .zcode/
 
