@@ -59,12 +59,16 @@ def bench_match_reid(n_animals: int, n_iters: int = 2000):
     from database import EmbeddingDatabase
 
     class FakeReID:
-        DINO_DIM = 384
+        DEEP_DIM = 384
         HSV_DIM = 48
         LBP_DIM = 32
-        w_dino = 0.5
+        TOTAL_DIM = DEEP_DIM + HSV_DIM + LBP_DIM
+        w_deep = 0.5
         w_hsv = 0.3
         w_lbp = 0.2
+        def slice_deep(self): return slice(0, self.DEEP_DIM)
+        def slice_hsv(self):  return slice(self.DEEP_DIM, self.DEEP_DIM + self.HSV_DIM)
+        def slice_lbp(self):  return slice(self.DEEP_DIM + self.HSV_DIM, self.TOTAL_DIM)
         @staticmethod
         def compare(a, b):
             return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
@@ -132,16 +136,16 @@ def bench_analyze_behavior(n_tracks: int = 5, n_iters: int = 500):
     return time.perf_counter() - t
 
 
-def bench_dino_batch(device: str = "cpu", n_crops: int = 4, n_iters: int = 20):
-    """Compare N forwards DINOv2 individuels vs 1 forward batché.
-    Optionnel, nécessite transformers + torch (~3s load)."""
+def bench_reid_batch(device: str = "cpu", n_crops: int = 4, n_iters: int = 20):
+    """Compare N forwards MegaDescriptor individuels vs 1 forward batché.
+    Optionnel, nécessite timm + torch (~3s load)."""
     try:
         import torch
         from reid import CattleReID
     except Exception as e:
         return None, None, str(e)
 
-    reid = CattleReID(model_name="facebook/dinov2-small",
+    reid = CattleReID(model_name="hf-hub:BVRA/MegaDescriptor-T-224",
                       device=device, use_compile=(device.startswith("cuda")))
     rng = np.random.default_rng(0)
     crops = [
@@ -176,8 +180,8 @@ def bench_dino_batch(device: str = "cpu", n_crops: int = 4, n_iters: int = 20):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--with-dino", action="store_true",
-                    help="Inclut le bench DINOv2 (lent à charger)")
+    ap.add_argument("--with-reid", action="store_true",
+                    help="Inclut le bench MegaDescriptor (lent à charger)")
     ap.add_argument("--n-animals", type=int, nargs="+", default=[5, 20, 50, 200])
     args = ap.parse_args()
 
@@ -210,8 +214,8 @@ def main():
     t = bench_analyze_behavior(n_tracks=5, n_iters=500)
     print(f"5 tracks × 500 iters: {t*1000:.1f} ms total = {t*1000/500:.3f} ms/call")
 
-    # 4) DINOv2 batch vs single (optionnel) — CPU et GPU si dispo
-    if args.with_dino:
+    # 4) MegaDescriptor batch vs single (optionnel) — CPU et GPU si dispo
+    if args.with_reid:
         try:
             import torch
             has_cuda = torch.cuda.is_available()
@@ -219,9 +223,9 @@ def main():
             has_cuda = False
 
         for dev in (["cpu", "cuda"] if has_cuda else ["cpu"]):
-            print(f"\n[4-{dev}] DINOv2 — batch vs single forward "
+            print(f"\n[4-{dev}] MegaDescriptor — batch vs single forward "
                   f"(chargement modèle ~3s)")
-            t_s, t_b, err = bench_dino_batch(device=dev, n_crops=4, n_iters=10)
+            t_s, t_b, err = bench_reid_batch(device=dev, n_crops=4, n_iters=10)
             if err:
                 print(f"  SKIP: {err}")
                 continue

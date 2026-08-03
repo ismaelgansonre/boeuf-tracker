@@ -372,7 +372,13 @@ def diag():
 
 @app.route("/api/db/reset", methods=["POST"])
 def reset_db():
-    """Purge la base de données des embeddings de la vidéo courante."""
+    """Purge la base de données des embeddings de la vidéo courante.
+
+    Body JSON optionnel :
+      { "reset_counter": true }  → remet aussi le compteur global de noms à 0
+                                    (recommandé si les noms affichent " 2"/" 3"
+                                    à cause d'un compteur qui a explosé).
+    """
     data = request.get_json(silent=True) or {}
     # Utilise la DB active (celle de la source courante), pas un chemin fixe.
     db = STATE.get("db")
@@ -388,9 +394,20 @@ def reset_db():
         db_path = data.get("path", "cattle_db.pkl")
         if os.path.exists(db_path):
             os.remove(db_path)
-    STATE["events"].insert(0, "DB RESET (vidéo courante)")
+
+    reset_counter = bool(data.get("reset_counter", False))
+    if reset_counter:
+        try:
+            from names import get_counter
+            get_counter().reset()
+        except Exception:
+            pass
+
+    msg = "base purgée" + (" + compteur global reset" if reset_counter else "")
+    STATE["events"].insert(0, f"DB RESET ({msg})")
     STATE["events"] = STATE["events"][:30]
-    return jsonify({"ok": True, "message": "base purgée", "path": db_path})
+    return jsonify({"ok": True, "message": msg, "path": db_path,
+                    "counter_reset": reset_counter})
 
 
 @app.route("/api/rematch", methods=["POST"])

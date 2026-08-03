@@ -167,10 +167,11 @@ class NameGenerator:
             if idx < len(NAME_POOL):
                 self._mapping[key] = NAME_POOL[idx]
             else:
-                # Au-dela du pool : combinaison suffixee (rare en pratique)
+                # Au-dela du pool : suffixe le numero de cycle.
+                # Cycle 1 (2eme passage) -> "Daphne 2", cycle 2 -> "Daphne 3", etc.
                 base = NAME_POOL[idx % len(NAME_POOL)]
                 cycle = idx // len(NAME_POOL)
-                self._mapping[key] = f"{base} {cycle + 2}"
+                self._mapping[key] = f"{base} {cycle + 1}"
 
     def get(self, key: str) -> str:
         """Retourne le nom propre pour une clé (Boeuf_001 → 'Marguerite')."""

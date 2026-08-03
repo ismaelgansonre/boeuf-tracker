@@ -182,18 +182,17 @@ class EmbeddingDatabase:
         """
         if self._matrix is None or self._matrix.shape[0] == 0:
             return np.zeros((0,), dtype=np.float32)
-        D = self.reid_engine.DINO_DIM
-        H = self.reid_engine.HSV_DIM
-        L = self.reid_engine.LBP_DIM
-        if q.shape[0] != D + H + L:
+        w = self.reid_engine
+        sl_d, sl_h, sl_l = w.slice_deep(), w.slice_hsv(), w.slice_lbp()
+        if q.shape[0] != w.TOTAL_DIM:
             # Fallback: cosine simple
             nq = float(np.linalg.norm(q))
             return (self._matrix @ q) / (self._norms * nq + 1e-8)
 
-        q_d, q_h, q_l = q[:D], q[D:D + H], q[D + H:]
-        M_d = self._matrix[:, :D]
-        M_h = self._matrix[:, D:D + H]
-        M_l = self._matrix[:, D + H:]
+        q_d, q_h, q_l = q[sl_d], q[sl_h], q[sl_l]
+        M_d = self._matrix[:, sl_d]
+        M_h = self._matrix[:, sl_h]
+        M_l = self._matrix[:, sl_l]
 
         n_d = np.linalg.norm(M_d, axis=1)
         n_h = np.linalg.norm(M_h, axis=1)
@@ -205,8 +204,7 @@ class EmbeddingDatabase:
         sim_d = (M_d @ q_d) / (n_d * nq_d + 1e-8)
         sim_h = (M_h @ q_h) / (n_h * nq_h + 1e-8)
         sim_l = (M_l @ q_l) / (n_l * nq_l + 1e-8)
-        w = self.reid_engine
-        return (w.w_dino * sim_d + w.w_hsv * sim_h + w.w_lbp * sim_l).astype(np.float32)
+        return (w.w_deep * sim_d + w.w_hsv * sim_h + w.w_lbp * sim_l).astype(np.float32)
 
     def add(self, name: str, embedding: np.ndarray, breed: str = None,
             breed_confidence: float = None,

@@ -21,67 +21,15 @@ import numpy as np
 import torch
 from PIL import Image
 
-try:
-    from numba import njit as _njit
-    _NUMBA_OK = True
-except Exception:
-    _NUMBA_OK = False
-
-    def _njit(*args, **kwargs):  # type: ignore
-        def deco(fn): return fn
-        return deco
-
-    # Import différé pour éviter une dépendance circulaire au moment du
-    # fallback (console ne dépend de personne ici). On prévient explicitement
-    # que les JIT sont désactivées pour que la dégradation de perf soit visible.
-    try:
-        from console import warn as _warn_fallback
-        _warn_fallback(
-            "[Numba] numba non installé — _total_displacement et "
-            "_classify_behavior tournent en Python pur (×5-10 plus lent). "
-            "Installez avec: pip install numba"
-        )
-    except Exception:
-        pass
-
-
-@_njit(cache=True, fastmath=True)
-def _total_displacement(pts_x, pts_y):
-    """Somme des distances euclidiennes entre points consécutifs. Numba JIT."""
-    s = 0.0
-    for i in range(1, pts_x.shape[0]):
-        dx = pts_x[i] - pts_x[i - 1]
-        dy = pts_y[i] - pts_y[i - 1]
-        s += (dx * dx + dy * dy) ** 0.5
-    return s
-
-
-@_njit(cache=True, fastmath=True)
-def _classify_behavior(speed: float, aspect: float, rel_y: float,
-                       immobile_dur: float) -> int:
-    """
-    Retourne un code d'action (0..6). Numba JIT, ultra-rapide.
-    0=couché, 1=pâture, 2=boit, 3=immobile, 4=marche, 5=court, 6=rué.
-    """
-    if aspect > 1.7 and speed < 5.0 and immobile_dur > 3.0:
-        return 0
-    if speed < 6.0 and aspect > 1.4:
-        return 1
-    if speed < 4.0 and aspect > 1.3 and rel_y > 0.6:
-        return 2
-    if speed < 5.0:
-        return 3
-    if speed < 25.0:
-        return 4
-    if speed < 80.0:
-        return 5
-    return 6
-
-
-_BEHAVIOR_LABELS = ("couché", "pâture", "boit", "immobile", "marche", "court", "rué")
-
-
 from console import info, ok, warn, err, dbg, evt, loop as log_loop
+from behavior import (
+    BehaviorAnalyzer, EventJournal, IsolationMonitor, TransitionMonitor,
+    NUMBA_OK as _NUMBA_OK,
+)
+from posture import MaskHeadAnalyzer, HeadMotionTracker
+if not _NUMBA_OK:  # pragma: no cover
+    warn("[Numba] non installé — JIT désactivé, comportement ×5-10 plus lent. "
+         "pip install numba")
 from detector import CattleDetector, CattleDetectorMLX
 from reid import CattleReID
 from database import EmbeddingDatabase
@@ -92,6 +40,12 @@ from names import make_name_generator
 from analytics import init as init_analytics, get as get_analytics, DetectionSample
 from state import STATE, color_for_name, reset_for_new_source
 from capture import open_capture, source_label
+
+try:
+    from skimage.morphology import skeletonize as _sk_skeletonize
+    _SKELETON_OK = True
+except Exception:
+    _SKELETON_OK = False
 
 
 def annotate_frame(annotated, masks_data, det_idx, x1, y1, x2, y2, color):
@@ -125,6 +79,18 @@ def annotate_frame(annotated, masks_data, det_idx, x1, y1, x2, y2, color):
                 roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
             )
             cv2.drawContours(annotated[ry1:ry2, rx1:rx2], contours, -1, color, 2)
+
+            # Squelette morphologique (option UI). Reduit la silhouette a
+            # une ligne mediane de 1 px, puis on la dessine par-dessus.
+            if _SKELETON_OK and STATE.get("show_skeleton"):
+                try:
+                    sk = _sk_skeletonize(roi_mask.astype(bool)).astype(np.uint8)
+                    ys, xs = np.where(sk > 0)
+                    if len(xs) > 0:
+                        roi_view = annotated[ry1:ry2, rx1:rx2]
+                        roi_view[ys, xs] = (255, 255, 255)
+                except Exception:
+                    pass
             mask_drawn = True
         except Exception:
             pass
@@ -133,54 +99,48 @@ def annotate_frame(annotated, masks_data, det_idx, x1, y1, x2, y2, color):
     return annotated
 
 
+# ────────────────────────────────────────────────────────────────
+#  Pipeline comportement : instances singletons partagées par la boucle.
+#  Les state dicts sont référencés depuis STATE — mêmes objets, pas de copie.
+# ────────────────────────────────────────────────────────────────
+_journal = EventJournal(events_ref=STATE["events"])
+_analyzer = BehaviorAnalyzer(
+    track_history=STATE["track_history"],
+    track_names=STATE.setdefault("_track_names", {}),
+    head_down_flags=STATE.setdefault("_head_down", {}),
+)
+_isolation = IsolationMonitor(journal=_journal)
+_transitions = TransitionMonitor(journal=_journal)
+# Posture : detection tete-au-sol depuis le masque + persistance temporelle
+_head_analyzer = MaskHeadAnalyzer()
+_head_motion = HeadMotionTracker()
+
+
 def analyze_behavior(boxes, track_ids, t_now, frame_shape=None):
-    """Catégorise l'activité: pâture, boit, couché, immobile, marche, court, rué.
+    """Wrapper stable pour callsites existants (bench_perf, boucle principale)."""
+    # Re-sync : STATE dicts peuvent être remplacés (reset_for_new_source)
+    _analyzer.track_history = STATE["track_history"]
+    _analyzer.track_names = STATE.get("_track_names", {})
+    _analyzer.head_down_flags = STATE.get("_head_down", {})
+    return _analyzer.analyze(boxes, track_ids, t_now, frame_shape)
 
-    Optimisé: les calculs lourds (somme de distances, classification) sont JIT
-    Numba → ~5-10× plus rapide que le pure Python sur la boucle interne.
-    """
-    behaviors = []
-    frame_h = frame_shape[0] if frame_shape is not None else 1080
-    for box, tid in zip(boxes, track_ids):
-        cx = (box[0] + box[2]) / 2
-        cy = (box[1] + box[3]) / 2
-        bw = box[2] - box[0]
-        bh = box[3] - box[1]
-        aspect = bw / max(bh, 1)
-        rel_y = cy / frame_h  # 0 = haut, 1 = bas
 
-        hist = STATE["track_history"].setdefault(int(tid), [])
-        hist.append((cx, cy, t_now))
-        STATE["track_history"][int(tid)] = [p for p in hist if t_now - p[2] < 5.0]
-        pts = STATE["track_history"][int(tid)]
-        if len(pts) < 3:
-            continue
+def push_user_event(kind: str, text: str, name: str | None = None) -> None:
+    _journal.events_ref = STATE["events"]
+    _journal.push(kind, text, name)
 
-        # Vitesse instantanée (sur la fenêtre historique)
-        dx = pts[-1][0] - pts[0][0]
-        dy = pts[-1][1] - pts[0][1]
-        dist = (dx * dx + dy * dy) ** 0.5
-        dt = max(pts[-1][2] - pts[0][2], 1e-3)
-        speed = dist / dt
 
-        # Displacement cumulé (JIT) + classification (JIT)
-        pts_arr = np.asarray(pts, dtype=np.float32)
-        total_disp = _total_displacement(pts_arr[:, 0], pts_arr[:, 1])
-        immobile_since = pts[0][2] if total_disp < 30 else None
-        immobile_dur = (t_now - immobile_since) if immobile_since is not None else 0.0
+def emit_isolation_alerts(boxes, track_ids, frame_shape) -> None:
+    _isolation.journal.events_ref = STATE["events"]
+    _isolation.update(
+        boxes, track_ids, frame_shape,
+        track_names=STATE.get("_track_names", {}),
+    )
 
-        action_code = _classify_behavior(float(speed), float(aspect),
-                                         float(rel_y), float(immobile_dur))
-        action = _BEHAVIOR_LABELS[action_code]
 
-        behaviors.append({
-            "name": STATE.get("_track_names", {}).get(int(tid), "?"),
-            "action": action,
-            "speed": round(float(speed), 1),
-            "track_id": int(tid),
-            "aspect": round(float(aspect), 2),
-        })
-    return behaviors
+def emit_behavior_transitions(behaviors: list[dict]) -> None:
+    _transitions.journal.events_ref = STATE["events"]
+    _transitions.update(behaviors)
 
 
 def _mlx_available() -> bool:
@@ -336,7 +296,7 @@ def detection_loop(args):
         detector = CattleDetectorMLX(model_name=mlx_model, device="mlx")
     else:
         detector = CattleDetector(model_name=args.yolo_model, device=device)
-    reid = CattleReID(model_name=args.dino_model, device=reid_device)
+    reid = CattleReID(model_name=args.reid_model, device=reid_device)
     # DB PAR VIDÉO : utilise le chemin de DB correspondant à la source
     # initiale, pas un fichier générique. Chaque vidéo a sa propre DB.
     initial_db_path = db_path_for_source(source)
@@ -751,23 +711,34 @@ def detection_loop(args):
                                     except Exception as e:
                                         warn(f"[DB] save failed: {e}")
                                     proper_name = name_gen.get(name)
-                                    event = (
-                                        f"NEW  {proper_name} ({name})  {coat_type} "
-                                        f"(sim_max={sim:.3f}, robe={breed_conf:.0%})"
+                                    race_txt = (
+                                        f" ({coat_type})"
+                                        if coat_type and coat_type != "Indeterminee"
+                                        else ""
                                     )
+                                    event = {
+                                        "kind": "arrival",
+                                        "name": proper_name,
+                                        "text": f"{proper_name}{race_txt} rejoint le troupeau",
+                                        "ts": time.time(),
+                                    }
                                 else:
                                     proper_name = name_gen.get(name)
-                                    event = (
-                                        f"MATCH {proper_name} ({name})  "
-                                        f"(sim={sim:.3f}, thr={eff_threshold:.2f})"
-                                    )
+                                    event = {
+                                        "kind": "return",
+                                        "name": proper_name,
+                                        "text": f"{proper_name} de retour dans le champ",
+                                        "ts": time.time(),
+                                    }
                                 track_id_to_name[int(tid)] = name
                                 track_emb_accum[int(tid)] = [emb]
                                 STATE["_track_names"] = track_id_to_name
                                 frame_names.add(name)
                                 if event:
-                                    STATE["events"].insert(0, event)
-                                    STATE["events"] = STATE["events"][:30]
+                                    push_user_event(
+                                        event["kind"], event["text"],
+                                        name=event.get("name"),
+                                    )
                             else:
                                 track_id_to_name[int(tid)] = "?"
                                 STATE["_track_names"] = track_id_to_name
@@ -809,13 +780,20 @@ def detection_loop(args):
                         # Nom propre (stable cross-session) via NameGenerator
                         display_name = name_gen.get(name) if name != "?" else "?"
 
-                        # Label avec nom propre + race (compact)
-                        label = f"{display_name}  {breed_name}  {float(conf):.2f}"
+                        # Lookup du comportement courant pour ce tid
+                        behavior_label = ""
+                        for _b in STATE.get("behavior", []):
+                            if _b.get("track_id") == int(tid):
+                                behavior_label = _b.get("action", "")
+                                break
+
+                        # Label affiche au-dessus de la tete : nom + comportement
+                        label = f"{display_name}  {behavior_label}".strip()
                         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
                         ly1 = max(0, y1 - th - 10)
                         ly2 = ly1 + th + 10
-                        cv2.rectangle(annotated, (x1, ly1), (x1 + tw, ly2), color, -1)
-                        cv2.putText(annotated, label, (x1, ly1 + th + 2),
+                        cv2.rectangle(annotated, (x1, ly1), (x1 + tw + 8, ly2), color, -1)
+                        cv2.putText(annotated, label, (x1 + 4, ly1 + th + 2),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
                         active.append({
                             "name": display_name,
@@ -855,7 +833,37 @@ def detection_loop(args):
                                 pass
 
                     # Comportement (sur la dernière frame traitée)
+                    # Head-down : voir posture.MaskHeadAnalyzer. Le signal est la
+                    # largeur de la plus longue plage de masque AU RAS DU SOL
+                    # (sabot etroit vs mufle large), invariant a l'orientation —
+                    # contrairement a l'aspect ratio qui echoue en vue laterale.
+                    # Le verdict est ensuite lisse temporellement par tid.
+                    head_down_by_tid = {}
+                    _active_tids = set()
+                    if masks_data is not None:
+                        _H, _W = frame.shape[:2]
+                        for _i, _tid in enumerate(track_ids):
+                            if _i >= len(masks_data):
+                                continue
+                            _tid_i = int(_tid)
+                            _active_tids.add(_tid_i)
+                            try:
+                                _mr = cv2.resize(masks_data[_i], (_W, _H),
+                                                 interpolation=cv2.INTER_NEAREST)
+                                _x1, _y1, _x2, _y2 = boxes[_i].astype(int)
+                                _roi = (_mr > 0.5)[max(0, _y1):min(_H, _y2),
+                                                   max(0, _x1):min(_W, _x2)]
+                                _state = _head_analyzer.analyze(_roi)
+                                head_down_by_tid[_tid_i] = _head_motion.update(
+                                    _tid_i, _state,
+                                )
+                            except Exception:
+                                pass
+                        _head_motion.prune(_active_tids)
+                    STATE["_head_down"] = head_down_by_tid
                     STATE["behavior"] = analyze_behavior(boxes, track_ids, time.time(), frame.shape)
+                    emit_behavior_transitions(STATE["behavior"])
+                    emit_isolation_alerts(boxes, track_ids, frame.shape)
 
                 # Encodage JPEG
                 enc_ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])

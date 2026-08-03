@@ -33,8 +33,8 @@ def parse_args():
                    help="Fichier base de données d'embeddings")
     p.add_argument("--yolo-model", type=str, default="yolo11n.pt",
                    help="Modèle YOLO (yolo11n/s/m/l/x.pt ou votre .pt fine-tuné)")
-    p.add_argument("--dino-model", type=str, default="facebook/dinov2-small",
-                   help="Modèle DINOv2 pour embeddings")
+    p.add_argument("--reid-model", type=str, default="hf-hub:BVRA/MegaDescriptor-T-224",
+                   help="Backbone re-ID (timm/HF hub). T-224 rapide, L-384 précis.")
     p.add_argument("--conf", type=float, default=0.4,
                    help="Seuil de confiance YOLO")
     p.add_argument("--no-save", action="store_true",
@@ -57,7 +57,7 @@ def main():
 
     print("=" * 64)
     print("  SYSTÈME DE RECONNAISSANCE DE BOVINS")
-    print("  YOLOv11 (détection + tracking) + DINOv2 (Re-ID)")
+    print("  YOLOv11 (détection + tracking) + MegaDescriptor (Re-ID)")
     print("=" * 64)
 
     # Source
@@ -77,7 +77,7 @@ def main():
 
     # Modèles
     detector = CattleDetector(model_name=args.yolo_model, device=device)
-    reid = CattleReID(model_name=args.dino_model, device=device)
+    reid = CattleReID(model_name=args.reid_model, device=device)
     db = EmbeddingDatabase(path=args.db)
 
     # Mémoire de session
