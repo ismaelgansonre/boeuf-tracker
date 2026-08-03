@@ -36,13 +36,17 @@ def _pick_default_source() -> str:
     """
     project_root = os.path.dirname(os.path.abspath(__file__))
     video_exts = (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v")
-    try:
-        for entry in sorted(os.listdir(project_root)):
-            full = os.path.join(project_root, entry)
-            if os.path.isfile(full) and entry.lower().endswith(video_exts):
-                return os.path.abspath(full)
-    except OSError:
-        pass
+    search_dirs = [os.path.join(project_root, "samples"), project_root]
+    for d in search_dirs:
+        if not os.path.isdir(d):
+            continue
+        try:
+            for entry in sorted(os.listdir(d)):
+                full = os.path.join(d, entry)
+                if os.path.isfile(full) and entry.lower().endswith(video_exts):
+                    return os.path.abspath(full)
+        except OSError:
+            continue
     return "0"
 
 
@@ -74,8 +78,8 @@ def parse_args():
     p.add_argument("--yolo-model", type=str, default=_default_yolo,
                    help="YOLO recommandé: yolo26s-seg.safetensors (MLX/Metal, Apple Silicon) "
                         "ou yolo11s-seg.pt (PyTorch, CUDA/CPU).")
-    p.add_argument("--dino-model", type=str, default="facebook/dinov2-small",
-                   help="DINOv2 small = parfait pour 1660 Ti. -base/-large = trop lourd.")
+    p.add_argument("--reid-model", type=str, default="hf-hub:BVRA/MegaDescriptor-T-224",
+                   help="Backbone re-ID (timm/HF hub). T-224 rapide, L-384 plus précis.")
     # --- Re-ID ---
     p.add_argument("--threshold", type=float, default=0.70,
                    help="Seuil cosine Re-ID normal (0.65-0.80). Plus haut = "
@@ -307,28 +311,32 @@ def list_videos():
     """Liste les vidéos présentes dans le dossier projet (racine + uploads/)."""
     video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".flv", ".wmv"}
     project_root = os.path.dirname(os.path.abspath(__file__))
+    samples_dir = os.path.join(project_root, "samples")
     found = []
-    # Racine du projet (exclure uploads/ pour éviter doublons)
-    for entry in os.listdir(project_root):
-        full = os.path.join(project_root, entry)
-        if os.path.isfile(full) and os.path.splitext(entry)[1].lower() in video_exts:
+    seen_paths: set[str] = set()
+
+    def _scan(directory: str, source_tag: str) -> None:
+        if not os.path.isdir(directory):
+            return
+        for entry in os.listdir(directory):
+            full = os.path.abspath(os.path.join(directory, entry))
+            if not os.path.isfile(full):
+                continue
+            if os.path.splitext(entry)[1].lower() not in video_exts:
+                continue
+            if full in seen_paths:
+                continue
+            seen_paths.add(full)
             found.append({
                 "name": entry,
-                "path": os.path.abspath(full),
+                "path": full,
                 "size_mb": round(os.path.getsize(full) / 1024 / 1024, 1),
-                "source": "project",
+                "source": source_tag,
             })
-    # Dossier uploads/
-    if os.path.isdir(UPLOAD_DIR):
-        for entry in os.listdir(UPLOAD_DIR):
-            full = os.path.join(UPLOAD_DIR, entry)
-            if os.path.isfile(full) and os.path.splitext(entry)[1].lower() in video_exts:
-                found.append({
-                    "name": entry,
-                    "path": os.path.abspath(full),
-                    "size_mb": round(os.path.getsize(full) / 1024 / 1024, 1),
-                    "source": "uploads",
-                })
+
+    _scan(samples_dir, "samples")
+    _scan(project_root, "project")
+    _scan(UPLOAD_DIR, "uploads")
     return jsonify({"videos": found})
 
 
@@ -437,6 +445,15 @@ def get_settings():
             "conf": STATE["desired_conf"],
         },
     })
+
+
+@app.route("/api/skeleton", methods=["POST"])
+def toggle_skeleton():
+    """Active/desactive l'affichage du squelette morphologique sur les bovins."""
+    payload = request.get_json(silent=True) or {}
+    val = bool(payload.get("enabled", not STATE.get("show_skeleton", False)))
+    STATE["show_skeleton"] = val
+    return jsonify({"ok": True, "show_skeleton": val})
 
 
 @app.route("/api/breeds")
@@ -556,11 +573,11 @@ def bench_fps():
         "yolo_mlx_error": None,
         "yolo11s_mps_fps": None,
         "yolo11s_mps_error": None,
-        "dino_mps_fps": None,
-        "dino_mps_error": None,
-        "coreml_dino_available": False,
-        "coreml_dino_fps": None,
-        "coreml_dino_error": None,
+        "reid_cpu_fps": None,
+        "reid_mps_fps": None,
+        "reid_cuda_fps": None,
+        "reid_dim": None,
+        "reid_error": None,
     }
 
     # --- Test image (1 frame, même condition pour tous) ---
@@ -622,58 +639,32 @@ def bench_fps():
     except Exception as e:
         results["yolo_mlx_error"] = str(e)
 
-    # ===== 3. DINOv2-small sur MPS (1 crop) =====
-    if torch.backends.mps.is_available():
-        try:
-            from transformers import AutoModel, AutoImageProcessor
+    # ===== 3. MegaDescriptor sur device courant (1 crop) =====
+    try:
+        from reid import MegaDescriptorExtractor
 
-            dino_model = AutoModel.from_pretrained("facebook/dinov2-small")
-            dino_proc = AutoImageProcessor.from_pretrained("facebook/dinov2-small")
-            dino_model.to("mps")
-            dino_model.eval()
+        bench_device = (
+            "cuda" if torch.cuda.is_available()
+            else "mps" if torch.backends.mps.is_available()
+            else "cpu"
+        )
+        extractor = MegaDescriptorExtractor(
+            model_name="hf-hub:BVRA/MegaDescriptor-T-224",
+            device=bench_device, use_compile=False,
+        )
+        crop = cv2.resize(dummy_img[100:350, 80:200], (224, 224))
 
-            crop = cv2.resize(dummy_img[100:350, 80:200], (224, 224))
-            crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-            pil = Image.fromarray(crop_rgb)
+        for _ in range(warmup_runs):
+            extractor.extract(crop)
 
-            # Warmup
-            for _ in range(warmup_runs):
-                with torch.no_grad():
-                    inputs = dino_proc(images=pil, return_tensors="pt").to("mps")
-                    dino_model(**inputs)
-
-            # Bench
-            t0 = time.perf_counter()
-            for _ in range(bench_runs):
-                with torch.no_grad():
-                    inputs = dino_proc(images=pil, return_tensors="pt").to("mps")
-                    dino_model(**inputs)
-            elapsed = time.perf_counter() - t0
-            results["dino_mps_fps"] = round(bench_runs / elapsed, 1)
-        except Exception as e:
-            results["dino_mps_error"] = str(e)
-
-    # ===== 4. DINOv2 sur CoreML (si déjà converti) =====
-    import os as _os
-    coreml_path = _os.path.join(_os.path.dirname(__file__), "dinov2-small.mlpackage")
-    if _os.path.isdir(coreml_path):
-        try:
-            import coremltools as ct
-            coreml_model = ct.models.MLModel(coreml_path)
-            results["coreml_dino_available"] = True
-
-            # Warmup
-            for _ in range(warmup_runs):
-                coreml_model.predict({"input_image": pil})
-
-            # Bench
-            t0 = time.perf_counter()
-            for _ in range(bench_runs):
-                coreml_model.predict({"input_image": pil})
-            elapsed = time.perf_counter() - t0
-            results["coreml_dino_fps"] = round(bench_runs / elapsed, 1)
-        except Exception as e:
-            results["coreml_dino_error"] = str(e)
+        t0 = time.perf_counter()
+        for _ in range(bench_runs):
+            extractor.extract(crop)
+        elapsed = time.perf_counter() - t0
+        results[f"reid_{bench_device}_fps"] = round(bench_runs / elapsed, 1)
+        results["reid_dim"] = extractor.dim
+    except Exception as e:
+        results["reid_error"] = str(e)
 
     return jsonify(results)
 
@@ -737,7 +728,7 @@ def main():
             f"URL       : http://{args.host}:{args.port}",
             f"Source    : {src_display}",
             f"YOLO      : {args.yolo_model}",
-            f"DINOv2    : {args.dino_model}",
+            f"Re-ID mdl : {args.reid_model}",
             f"Device    : {args.device}",
             f"Imgsz     : {args.imgsz}",
             f"Confiance : {args.conf}",

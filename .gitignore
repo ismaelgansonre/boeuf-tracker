@@ -22,6 +22,18 @@ screenshot_*.jpg
 videos/
 data/
 
+# HuggingFace model cache
+.cache/
+models/*.pt
+models/*.safetensors
+
+# Vidéos utilisateur uploadées (samples/ EST tracké, uploads/ non)
+uploads/*.mp4
+uploads/*.mov
+uploads/*.avi
+uploads/*.mkv
+uploads/*.webm
+
 # IDE
 .vscode/
 .idea/
