@@ -117,16 +117,27 @@ async function refreshStats() {
                 </li>`;
             }).join('');
 
-        // ── Événements ──
-        const ev = data.events || [];
+        // ── Événements (objets: {kind,text,name,ts}) — on filtre le bruit systeme ──
+        const EVENT_ICON = {
+            arrival: '＋', return: '↻', departure: '−',
+            behavior: '•', alert: '⚠', system: '⚙',
+        };
+        const ev = (data.events || [])
+            .map(e => (typeof e === 'string' ? { kind: 'system', text: e } : e))
+            .filter(e => e.kind !== 'system');
         $('event-list').innerHTML = ev.length === 0
             ? '<li class="list-empty">Aucun événement</li>'
             : ev.map(e => {
-                const cls = e.startsWith('NEW') ? 'event-new'
-                          : e.startsWith('MATCH') ? 'event-match'
-                          : e.startsWith('CRASH') ? 'event-crash'
-                          : '';
-                return `<li class="event-item ${cls}">${escapeHtml(e)}</li>`;
+                const cls = 'event-' + (e.kind || 'system');
+                const icon = EVENT_ICON[e.kind] || '·';
+                const t = e.ts ? new Date(e.ts * 1000)
+                    .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                    : '';
+                return `<li class="event-item ${cls}">
+                    <span class="event-icon">${icon}</span>
+                    <span class="event-text">${escapeHtml(e.text || '')}</span>
+                    <span class="event-time">${t}</span>
+                </li>`;
             }).join('');
 
         // ── Activités ──
@@ -252,6 +263,20 @@ $('device-select').addEventListener('change', async () => {
 
 // ─── Reset DB modal ─────────────────────────────────────────────
 $('btn-reset-db').addEventListener('click', () => $('modal-reset').showModal());
+
+let skeletonOn = false;
+$('btn-skeleton').addEventListener('click', async () => {
+    try {
+        const res = await fetch('/api/skeleton', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ enabled: !skeletonOn }),
+        });
+        const data = await res.json();
+        skeletonOn = !!data.show_skeleton;
+        $('btn-skeleton').classList.toggle('active', skeletonOn);
+    } catch (e) {}
+});
 $('btn-reset-cancel').addEventListener('click', () => $('modal-reset').close());
 $('btn-reset-confirm').addEventListener('click', async (e) => {
     e.preventDefault();
@@ -607,7 +632,7 @@ setInterval(() => { if (dashPanel.classList.contains('open')) refreshDashboard()
 const statsPanel = $('stats-panel');
 $('btn-stats').addEventListener('click', () => {
     statsPanel.classList.add('open');
-    refreshStats();
+    refreshStatsPanel();
 });
 $('btn-stats-close').addEventListener('click', () => statsPanel.classList.remove('open'));
 
@@ -628,7 +653,7 @@ const ACT_COLORS = {
 function behaviorLabel(k) { return BEHAVIOR_LABELS[k] || k; }
 function actColor(k) { return ACT_COLORS[k] || '#64748b'; }
 
-async function refreshStats() {
+async function refreshStatsPanel() {
     try {
         const res = await fetch('/api/profiles');
         const d = await res.json();
@@ -680,15 +705,21 @@ async function refreshStats() {
                 <div class="stats-section">
                     <div class="stats-section-title">Activites (% du temps)</div>
                     <div class="stats-acts">
-                        ${acts.map(([k, pct]) => `
+                        ${acts.map(([k, pct]) => {
+                            const dur = (p.durations_min || {})[k];
+                            const durTxt = dur != null
+                                ? (dur >= 1 ? `${dur} min` : `${Math.round(dur * 60)}s`)
+                                : '';
+                            return `
                             <div class="stats-act-row">
                                 <span class="stats-act-label">${escapeHtml(behaviorLabel(k))}</span>
                                 <div class="stats-act-bar-bg">
                                     <div class="stats-act-bar" style="width:${pct}%;background:${actColor(k)}"></div>
                                 </div>
                                 <span class="stats-act-pct">${pct}%</span>
-                            </div>
-                        `).join('')}
+                                <span class="stats-act-dur">${durTxt}</span>
+                            </div>`;
+                        }).join('')}
                     </div>
                 </div>` : ''}
             </div>`;
@@ -697,4 +728,4 @@ async function refreshStats() {
         console.error('stats refresh error:', e);
     }
 }
-setInterval(() => { if (statsPanel.classList.contains('open')) refreshStats(); }, 5000);
+setInterval(() => { if (statsPanel.classList.contains('open')) refreshStatsPanel(); }, 5000);

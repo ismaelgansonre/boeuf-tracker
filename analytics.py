@@ -43,6 +43,7 @@ class DetectionSample:
     cy_norm: float                  # position Y normalisee 0-1
     behavior: str                   # 'grazing', 'walking', 'lying', ...
     source: str = ""                # nom de la video/source courante
+    ts: float = field(default_factory=time.time)   # wall-clock, pour cumuls
 
 
 @dataclass
@@ -83,6 +84,8 @@ class AnalyticsState:
             "total": 0,
             "videos": defaultdict(int),
             "activities": defaultdict(int),
+            "last_ts_per_act": {},         # dernier ts vu par activite
+            "duration_by_act": defaultdict(float),
             "min_frame": None, "max_frame": None,
         })
         for s in self.detection_samples:
@@ -97,6 +100,13 @@ class AnalyticsState:
             r["videos"][src] += 1
             act = s.get("behavior") or "active"
             r["activities"][act] += 1
+            ts = s.get("ts")
+            if ts is not None:
+                prev = r["last_ts_per_act"].get(act)
+                # gap < 2s = continuite -> on cumule l'intervalle
+                if prev is not None and 0 < ts - prev < 2.0:
+                    r["duration_by_act"][act] += ts - prev
+                r["last_ts_per_act"][act] = ts
             fr = s.get("frame")
             if fr is not None:
                 r["min_frame"] = fr if r["min_frame"] is None else min(r["min_frame"], fr)
@@ -115,6 +125,8 @@ class AnalyticsState:
                 "activities": dict(r["activities"]),
                 "activities_pct": {k: round(v / total * 100, 1)
                                    for k, v in r["activities"].items()},
+                "durations_sec": {k: round(v, 1) for k, v in r["duration_by_act"].items()},
+                "durations_min": {k: round(v / 60.0, 1) for k, v in r["duration_by_act"].items()},
                 "first_frame": r["min_frame"],
                 "last_frame": r["max_frame"],
             }
