@@ -26,7 +26,15 @@ from behavior import (
     BehaviorAnalyzer, EventJournal, IsolationMonitor, TransitionMonitor,
     NUMBA_OK as _NUMBA_OK,
 )
-from posture import MaskHeadAnalyzer, HeadMotionTracker
+from posture import MaskHeadAnalyzer, HeadMotionTracker, overlap_fractions
+
+# Marge de similarite requise pour retirer un nom a la piste qui le porte.
+# Trop bas -> les noms sautent d'une piste a l'autre ; trop haut -> le vrai
+# bovin ne peut jamais reprendre son nom apres une occlusion.
+REASSIGN_MARGIN = 0.05
+# Au-dela de cette fraction de recouvrement par un congenere, l'imagette est
+# consideree polluee : on ne s'en sert pas pour mettre a jour l'empreinte.
+OCCLUSION_SKIP_FRAC = 0.25
 if not _NUMBA_OK:  # pragma: no cover
     warn("[Numba] non installé — JIT désactivé, comportement ×5-10 plus lent. "
          "pip install numba")
@@ -366,6 +374,9 @@ def detection_loop(args):
     track_id_to_name = {}
     STATE["_track_names"] = track_id_to_name  # pour behavior
     track_emb_accum = {}
+    # Similarite a laquelle chaque piste a revendique son nom. Sert d'arbitre
+    # quand deux pistes revendiquent le meme bovin dans une frame.
+    track_claim_sim: dict[int, float] = {}
     fps_smooth = 0.0
     frame_idx = 0
 
@@ -602,11 +613,16 @@ def detection_loop(args):
                     )
 
                     # Noms déjà attribués dans cette frame (pour exclusion)
+                    current_tids = {int(t) for t in track_ids}
                     frame_names = {
                         track_id_to_name[t]
-                        for t in track_ids
-                        if int(t) in track_id_to_name and track_id_to_name[int(t)] != "?"
+                        for t in current_tids
+                        if t in track_id_to_name and track_id_to_name[t] != "?"
                     }
+                    # Fraction de chaque bovin masquée par un congénère. Une
+                    # imagette trop recouverte contient l'autre animal : elle
+                    # ferait dériver l'empreinte de référence si on l'utilisait.
+                    occl_frac = overlap_fractions(boxes)
 
                     # Phase 1: collecte des crops éligibles à l'embedding
                     # (1 seul forward DINOv2 batché au lieu de N forwards)
@@ -678,11 +694,47 @@ def detection_loop(args):
                                 eff_threshold = (
                                     loop_threshold if in_loop_grace else args.threshold
                                 )
-                                name, sim = db.match(
-                                    emb,
-                                    threshold=eff_threshold,
-                                    exclude=frame_names,
-                                )
+                                # ── Arbitrage du nom ────────────────────────
+                                # On cherche d'abord le MEILLEUR candidat, sans
+                                # exclusion. Si ce nom est deja porte dans la
+                                # frame, on compare les deux revendications au
+                                # lieu de laisser le premier arrive le garder.
+                                #
+                                # Cas reel corrige : un bovin masque perd sa
+                                # piste ; l'occulteur herite de son identifiant
+                                # (tracker IoU glouton) donc de son nom. Quand
+                                # le vrai bovin reapparait, son propre nom est
+                                # "deja pris" -> il etait exclu et recevait un
+                                # nouveau nom, definitivement ecrit en base.
+                                name, sim = db.match(emb, threshold=eff_threshold)
+                                if name is not None and name in frame_names:
+                                    holder = next(
+                                        (t for t in current_tids
+                                         if track_id_to_name.get(t) == name
+                                         and t != tid_int),
+                                        None,
+                                    )
+                                    holder_sim = track_claim_sim.get(holder, 0.0)
+                                    if sim > holder_sim + REASSIGN_MARGIN:
+                                        # Le nouveau venu revendique nettement
+                                        # mieux : on lui transfere le nom et on
+                                        # force l'ancien porteur a se re-identifier.
+                                        if holder is not None:
+                                            track_id_to_name[holder] = "?"
+                                            track_claim_sim.pop(holder, None)
+                                            track_emb_accum.pop(holder, None)
+                                        frame_names.discard(name)
+                                        dbg(f"[Re-ID] {name} transfere piste "
+                                            f"{holder}->{tid_int} "
+                                            f"(sim {holder_sim:.2f}->{sim:.2f})")
+                                    else:
+                                        # Le porteur actuel reste legitime :
+                                        # on cherche un autre candidat.
+                                        name, sim = db.match(
+                                            emb,
+                                            threshold=eff_threshold,
+                                            exclude=frame_names,
+                                        )
                                 event = None
                                 if name is None:
                                     # Cle unique via compteur global persistant :
@@ -732,6 +784,7 @@ def detection_loop(args):
                                     }
                                 track_id_to_name[int(tid)] = name
                                 track_emb_accum[int(tid)] = [emb]
+                                track_claim_sim[tid_int] = float(sim)
                                 STATE["_track_names"] = track_id_to_name
                                 frame_names.add(name)
                                 if event:
@@ -744,6 +797,14 @@ def detection_loop(args):
                                 STATE["_track_names"] = track_id_to_name
                         elif det_idx in reembed_track_indices:
                             emb = emb_by_tid.get(tid_int)
+                            # Imagette polluee par un congenere -> on ne met pas
+                            # a jour l'empreinte de reference. Sans ce garde-fou,
+                            # l'empreinte d'un bovin partiellement masque derive
+                            # vers celle de l'occulteur et il finit par ne plus
+                            # se reconnaitre lui-meme.
+                            if (emb is not None and det_idx < len(occl_frac)
+                                    and occl_frac[det_idx] > OCCLUSION_SKIP_FRAC):
+                                emb = None
                             if emb is not None:
                                 buf = track_emb_accum.setdefault(int(tid), [])
                                 buf.append(emb)

@@ -164,6 +164,44 @@ class MaskHeadAnalyzer:
 # ─────────────────────────────────────────────────────────────
 #  Persistance temporelle — "est-ce que ça bouge / ça dure ?"
 # ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+#  Occlusion entre bovins
+# ─────────────────────────────────────────────────────────────
+def overlap_fractions(boxes) -> np.ndarray:
+    """Pour chaque boîte, la fraction de SA surface recouverte par une autre.
+
+    On mesure `intersection / aire_de_la_boîte`, et non l'IoU : ce qui compte
+    ici n'est pas la ressemblance entre deux boîtes mais la part de l'animal
+    qui est masquée. Un petit veau entièrement caché derrière une vache adulte
+    a une IoU faible mais une fraction de recouvrement proche de 1.
+
+    Sert à deux choses :
+      - ne pas mettre à jour l'empreinte de ré-identification à partir d'une
+        imagette polluée par un congénère (dérive de l'empreinte stockée) ;
+      - ne pas conclure sur la posture quand la silhouette est tronquée.
+    """
+    arr = np.asarray(boxes, dtype=np.float32)
+    n = len(arr)
+    if n == 0:
+        return np.zeros(0, dtype=np.float32)
+    out = np.zeros(n, dtype=np.float32)
+    if n == 1:
+        return out
+
+    areas = np.maximum(arr[:, 2] - arr[:, 0], 0) * np.maximum(arr[:, 3] - arr[:, 1], 0)
+    for i in range(n):
+        if areas[i] <= 0:
+            continue
+        x1 = np.maximum(arr[i, 0], arr[:, 0])
+        y1 = np.maximum(arr[i, 1], arr[:, 1])
+        x2 = np.minimum(arr[i, 2], arr[:, 2])
+        y2 = np.minimum(arr[i, 3], arr[:, 3])
+        inter = np.maximum(x2 - x1, 0) * np.maximum(y2 - y1, 0)
+        inter[i] = 0.0  # ne pas se comparer à soi-même
+        out[i] = float(inter.max()) / float(areas[i])
+    return out
+
+
 @dataclass
 class HeadMotionTracker:
     """Suit la posture de tête d'un track sur une fenêtre glissante.

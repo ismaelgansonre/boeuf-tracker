@@ -9,7 +9,10 @@ faisait échouer l'heuristique par aspect ratio) :
 import numpy as np
 import pytest
 
-from posture import HeadMotionTracker, HeadState, MaskHeadAnalyzer, longest_run
+from posture import (
+    HeadMotionTracker, HeadState, MaskHeadAnalyzer, longest_run,
+    overlap_fractions,
+)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -160,6 +163,44 @@ def test_motion_sweep_measures_lateral_movement():
     for _ in range(4):
         t2.update(2, _state(True, x=0.25))
     assert t2.sweep(2) == pytest.approx(0.0, abs=1e-5)  # tête fixe
+
+
+# ─────────────────────────────────────────────────────────────
+#  overlap_fractions — détection d'occlusion entre bovins
+# ─────────────────────────────────────────────────────────────
+def test_overlap_empty_and_single():
+    assert len(overlap_fractions([])) == 0
+    assert overlap_fractions([[0, 0, 10, 10]]).tolist() == [0.0]
+
+
+def test_overlap_disjoint_boxes_are_zero():
+    f = overlap_fractions([[0, 0, 10, 10], [50, 50, 60, 60]])
+    assert f.tolist() == [0.0, 0.0]
+
+
+def test_overlap_half_covered():
+    # b couvre la moitié droite de a
+    f = overlap_fractions([[0, 0, 10, 10], [5, 0, 15, 10]])
+    assert f[0] == pytest.approx(0.5, abs=1e-3)
+    assert f[1] == pytest.approx(0.5, abs=1e-3)
+
+
+def test_overlap_is_asymmetric_for_different_sizes():
+    """Un petit veau caché derrière une vache : IoU faible, recouvrement total.
+
+    C'est précisément le cas que l'IoU ne détecte pas et qui pollue l'imagette.
+    """
+    grande = [0, 0, 100, 100]
+    petit = [10, 10, 30, 30]          # entièrement inclus dans la grande
+    f = overlap_fractions([grande, petit])
+    assert f[0] == pytest.approx(0.04, abs=1e-3)   # 400/10000
+    assert f[1] == pytest.approx(1.0, abs=1e-3)    # totalement recouvert
+
+
+def test_overlap_takes_the_worst_offender():
+    boxes = [[0, 0, 10, 10], [8, 0, 18, 10], [2, 0, 12, 10]]
+    f = overlap_fractions(boxes)
+    assert f[0] == pytest.approx(0.8, abs=1e-3)   # la 3e recouvre 80 % de la 1re
 
 
 def test_motion_prune_frees_lost_tracks():
