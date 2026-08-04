@@ -31,6 +31,9 @@ const BEHAVIOR_BADGES = {
     'pâture': 'badge-grazing',
     'boit': 'badge-drinking',
     'couché': 'badge-lying',
+    'rumine': 'badge-lying',
+    'se couche': 'badge-lying',
+    'se lève': 'badge-lying',
     'court': 'badge-running',
     'rué': 'badge-running',
     'immobile': 'badge-neutral',
@@ -641,6 +644,9 @@ const BEHAVIOR_LABELS = {
     active: 'Actif', immobile: 'Immobile', marche: 'Marche',
     court: 'Court', rue: 'Rue', lying: 'Couche', grazing: 'Pature',
     walking: 'Marche', standing: 'Debout',
+    // Cles produites par behavior.py (accentuees, telles quelles en base)
+    'couché': 'Couche', 'pâture': 'Pature', boit: 'Boit', 'rué': 'Rue',
+    rumine: 'Rumine', 'se couche': 'Se couche', 'se lève': 'Se leve',
 };
 
 // Couleurs pour les barres d'activite
@@ -648,6 +654,9 @@ const ACT_COLORS = {
     active: '#16a34a', marche: '#3b82f6', court: '#f59e0b',
     rue: '#ef4444', immobile: '#6b7280', lying: '#8b5cf6',
     grazing: '#22c55e', standing: '#0ea5e9', walking: '#3b82f6',
+    'couché': '#8b5cf6', 'pâture': '#22c55e', boit: '#06b6d4',
+    'rué': '#ef4444', rumine: '#a855f7',
+    'se couche': '#7c3aed', 'se lève': '#7c3aed',
 };
 
 function behaviorLabel(k) { return BEHAVIOR_LABELS[k] || k; }

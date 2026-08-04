@@ -94,8 +94,24 @@ def parse_args():
                         "Empêche la dérive de l'embedding de référence.")
     p.add_argument("--db", type=str, default="cattle_db.pkl")
     # --- YOLO runtime ---
-    p.add_argument("--conf", type=float, default=0.4,
-                   help="Confiance min YOLO. 0.4 = bon plein air.")
+    # Mesures sur les sequences de terrain (samples/IMG_354x, 854x480, troupeau
+    # au cornadis), nombre de bovins detectes sur une meme frame :
+    #   imgsz=640  conf=0.40 ->  3      (ancien defaut)
+    #   imgsz=960  conf=0.25 -> 12
+    #   imgsz=1280 conf=0.25 -> 18
+    #   imgsz=1280 conf=0.20 -> 21      (~100 ms/frame sur M1 Pro)
+    # Le rappel est domine par la RESOLUTION : les bovins d'arriere-plan font
+    # 30-50 px de large et disparaissent des cartes de caracteristiques a 640.
+    # Le seuil de confiance vient ensuite. Defaut = 1280/0.25, soit ~10 FPS
+    # sur M1 Pro ; descendre a 960 rend ~40 % de debit si besoin.
+    p.add_argument("--conf", type=float, default=0.25,
+                   help="Confiance min YOLO. 0.25 = troupeau serre, "
+                        "0.40 = sujets proches uniquement.")
+    p.add_argument("--no-extra-classes", action="store_true",
+                   help="N'accepter que la classe COCO 'cow'. Par defaut on "
+                        "accepte aussi 'horse' et 'sheep', que COCO confond "
+                        "avec des bovins de dos ou lointains. A activer si des "
+                        "chevaux ou moutons partagent l'enclos.")
     p.add_argument("--device", type=str, default="auto",
                    help="'auto' (CUDA si dispo), 'cpu', 'cuda:0'.")
     p.add_argument("--mlx", action="store_true",
@@ -103,9 +119,10 @@ def parse_args():
                         "PyTorch MPS. ~2.6× plus rapide sur M1/M2/M3/M4.")
     p.add_argument("--skip-frames", type=int, default=0,
                    help="0 = toutes les frames. 1 = 1 sur 2 (~2x FPS).")
-    p.add_argument("--imgsz", type=int, default=640,
-                   help="Taille d'inférence YOLO. 640=équilibre. "
-                        "416=max FPS. 800=+précision.")
+    p.add_argument("--imgsz", type=int, default=1280,
+                   help="Taille d'inférence YOLO. 1280=rappel max (défaut), "
+                        "960=compromis, 640=max FPS mais perd les bovins "
+                        "d'arrière-plan.")
     p.add_argument("--embed-every", type=int, default=10,
                    help="Recalculer l'embedding DINOv2 tous les N frames (perf).")
     p.add_argument("--no-save", action="store_true")

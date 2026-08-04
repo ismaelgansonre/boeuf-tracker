@@ -43,6 +43,17 @@ def _grazing_mask(w=300, h=200, head_left=True):
     return m
 
 
+def _lying_mask(w=300, h=200):
+    """Vache couchée : le flanc repose au sol, pas de pattes visibles.
+
+    La bande basse est un bloc plein sur presque toute la largeur — c'est ce
+    qui la faisait passer pour un mufle géant, donc pour de la pâture.
+    """
+    m = np.zeros((h, w), dtype=bool)
+    m[int(h * 0.30):h, int(w * 0.05):int(w * 0.95)] = True
+    return m
+
+
 @pytest.fixture
 def analyzer():
     return MaskHeadAnalyzer()
@@ -102,6 +113,38 @@ def test_grazing_head_x_is_lateral(analyzer):
 
 
 # ─────────────────────────────────────────────────────────────
+#  Couché — le cas qui était étiqueté "pâture"
+# ─────────────────────────────────────────────────────────────
+def test_lying_is_detected(analyzer):
+    state = analyzer.analyze(_lying_mask())
+    assert state.lying is True
+    assert state.ground_fill > 0.5
+
+
+def test_lying_is_not_reported_as_head_down(analyzer):
+    """Régression : un bovin couché ne doit PAS lever le drapeau pâture."""
+    assert analyzer.analyze(_lying_mask()).head_down is False
+
+
+def test_standing_and_grazing_are_not_lying(analyzer):
+    assert analyzer.analyze(_standing_mask()).lying is False
+    assert analyzer.analyze(_grazing_mask()).lying is False
+
+
+def test_truncated_bottom_never_concludes_lying(analyzer):
+    """Gros plan coupé par le bord bas : silhouette pleine, mais debout."""
+    state = analyzer.analyze(_lying_mask(), truncated_bottom=True)
+    assert state.lying is False
+    assert state.head_down is False
+
+
+def test_lying_is_scale_invariant(analyzer):
+    small = analyzer.analyze(_lying_mask(w=120, h=80))
+    large = analyzer.analyze(_lying_mask(w=600, h=400))
+    assert small.lying is large.lying is True
+
+
+# ─────────────────────────────────────────────────────────────
 #  Robustesse
 # ─────────────────────────────────────────────────────────────
 def test_empty_mask_is_unknown(analyzer):
@@ -127,8 +170,37 @@ def test_scale_invariant(analyzer):
 # ─────────────────────────────────────────────────────────────
 #  HeadMotionTracker
 # ─────────────────────────────────────────────────────────────
-def _state(down: bool, x: float = 0.2) -> HeadState:
-    return HeadState(down, 0.8 if down else 0.0, 0.2 if down else 0.05, x, "test")
+def _state(down: bool, x: float = 0.2, lying: bool = False) -> HeadState:
+    return HeadState(down, 0.8 if down else 0.0, 0.2 if down else 0.05, x, "test",
+                     lying=lying)
+
+
+def test_motion_tracks_lying_with_persistence():
+    t = HeadMotionTracker(window=10, lying_min_ratio=0.6)
+    for _ in range(3):
+        t.update(1, _state(False, lying=True))
+    assert t.is_lying(1) is False           # 3/10 → pas encore concluant
+    for _ in range(7):
+        t.update(1, _state(False, lying=True))
+    assert t.is_lying(1) is True
+
+
+def test_lying_track_is_never_reported_grazing():
+    """Même si le masque lève head_down, un couché n'est pas en pâture."""
+    t = HeadMotionTracker(window=10)
+    for _ in range(10):
+        t.update(1, _state(True, lying=True))
+    assert t.is_lying(1) is True
+    assert t.is_grazing(1) is False
+
+
+def test_motion_forget_clears_lying_history():
+    t = HeadMotionTracker(window=8, lying_min_frames=4)
+    for _ in range(8):
+        t.update(7, _state(False, lying=True))
+    assert t.is_lying(7) is True
+    t.forget(7)
+    assert t.is_lying(7) is False
 
 
 def test_motion_requires_persistence():

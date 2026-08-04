@@ -20,16 +20,81 @@ from ultralytics import YOLO
 
 from console import info, ok, warn
 
+# ─────────────────────────────────────────────────────────────────────────
+#  Classes COCO acceptées comme "bovin"
+# ─────────────────────────────────────────────────────────────────────────
+# COCO ne contient qu'une classe 'cow' (19), entraînée sur des photos de
+# prairie. Sur des images de ferme — troupeau serré, animaux de dos, sujets
+# lointains, veaux — le réseau hésite entre 'cow', 'horse' (17) et 'sheep'
+# (18) : le score se répartit entre les trois et aucun ne passe le seuil.
+# Accepter les trois récupère ces animaux au lieu de les perdre.
+#
+# À désactiver (`extra_classes=False`) si des chevaux ou des moutons partagent
+# réellement l'enclos, sans quoi ils seront comptés comme bovins.
+COW_CLASS_ID = 19
+HORSE_CLASS_ID = 17
+SHEEP_CLASS_ID = 18
+CATTLE_CLASS_IDS = (COW_CLASS_ID, HORSE_CLASS_ID, SHEEP_CLASS_ID)
+
+
+def dedup_boxes(
+    xyxy: np.ndarray,
+    conf: np.ndarray,
+    contain_frac: float = 0.75,
+    iou_thr: float = 0.75,
+) -> np.ndarray:
+    """Indices à conserver après suppression des boîtes redondantes.
+
+    POURQUOI, ALORS QUE YOLO26 EST end2end (SANS NMS)
+    -------------------------------------------------
+    YOLO26 apprend à ne sortir qu'une boîte par objet, et se passe donc de NMS.
+    Cet apprentissage tient à la résolution d'entraînement ; en montant `imgsz`
+    (ce qu'on fait pour récupérer les bovins lointains), un même animal
+    ressort parfois 2-3 fois : une boîte sur le corps, une sur l'avant-train.
+    Ces doublons créeraient autant de fausses identités en base.
+    """
+    n = len(xyxy)
+    if n == 0:
+        return np.empty(0, dtype=np.int64)
+    areas = (np.maximum(xyxy[:, 2] - xyxy[:, 0], 0)
+             * np.maximum(xyxy[:, 3] - xyxy[:, 1], 0))
+    keep: list[int] = []
+    for i in np.argsort(-np.asarray(conf)):  # du plus sûr au moins sûr
+        i = int(i)
+        redundant = False
+        for j in keep:
+            x1 = max(xyxy[i, 0], xyxy[j, 0])
+            y1 = max(xyxy[i, 1], xyxy[j, 1])
+            x2 = min(xyxy[i, 2], xyxy[j, 2])
+            y2 = min(xyxy[i, 3], xyxy[j, 3])
+            inter = max(0.0, float(x2 - x1)) * max(0.0, float(y2 - y1))
+            if inter <= 0.0:
+                continue
+            # Boîte essentiellement contenue dans une boîte déjà retenue :
+            # l'IoU ne le voit pas (aires très différentes), le recouvrement si.
+            if inter / max(float(areas[i]), 1e-6) > contain_frac:
+                redundant = True
+                break
+            union = float(areas[i]) + float(areas[j]) - inter
+            if inter / max(union, 1e-6) > iou_thr:
+                redundant = True
+                break
+        if not redundant:
+            keep.append(i)
+    return np.array(sorted(keep), dtype=np.int64)
+
 
 class CattleDetector:
-    COW_CLASS_ID = 19  # COCO: 'cow'
+    COW_CLASS_ID = COW_CLASS_ID  # COCO: 'cow'
 
     def __init__(
         self,
         model_name: str = "yolo11n-seg.pt",
         device: str | None = None,
         half: bool | None = None,
+        extra_classes: bool = True,
     ):
+        self.classes = list(CATTLE_CLASS_IDS) if extra_classes else [COW_CLASS_ID]
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         self.device = device
@@ -64,20 +129,26 @@ class CattleDetector:
             pass
         ok(f"[YOLO] Modele {model_name} pret ({device}, FP16={self.half})")
 
-    def detect(self, frame, persist: bool = True, conf: float = 0.4, imgsz: int = 640):
+    def detect(self, frame, persist: bool = True, conf: float = 0.25, imgsz: int = 960):
         """Detecte + track + segmente les bovins. Retourne results[0].
 
         imgsz: taille d'inference. 640 = rapide, 1280 = +precis mais +lent.
         Note: on ne passe plus `half=` (deprecie) -- le modele est deja en FP16
         si self.half=True (cf. __init__).
+
+        `iou=0.7` : NMS plus permissif que le defaut. Dans un troupeau serre,
+        deux bovins cote a cote ont des boites qui se recouvrent largement ;
+        un seuil bas en supprimerait un.
         """
         return self.model.track(
             frame,
-            classes=[self.COW_CLASS_ID],
+            classes=self.classes,
             persist=persist,
             device=self.device,
             verbose=False,
             conf=conf,
+            iou=0.7,
+            max_det=100,
             tracker="bytetrack.yaml",
             imgsz=imgsz,
         )[0]
@@ -101,13 +172,21 @@ class CattleDetectorMLX:
     si deux appels sont en cours simultanement). On sérialise les appels
     avec un lock pour éviter ce crash.
     """
-    COW_CLASS_ID = 19  # COCO: 'cow' (same as Ultralytics)
+    COW_CLASS_ID = COW_CLASS_ID  # COCO: 'cow' (same as Ultralytics)
 
-    def __init__(self, model_name: str = "yolo26s-seg.safetensors", device: str = "mlx"):
+    def __init__(
+        self,
+        model_name: str = "yolo26s-seg.safetensors",
+        device: str = "mlx",
+        extra_classes: bool = True,
+    ):
         self.device = device
         self.half = True  # MLX utilise FP16 nativement
+        self.classes = np.array(
+            CATTLE_CLASS_IDS if extra_classes else (COW_CLASS_ID,)
+        )
         self._mlx_lock = threading.Lock()  # instance lock (thread-safety Metal)
-        self._iou_tracker = _SimpleIoUTracker(iou_threshold=0.3, max_lost=30)
+        self._iou_tracker = _SimpleIoUTracker(iou_threshold=0.25, max_lost=45)
 
         info(f"[YOLO26-MLX] Chargement de {model_name} sur MLX (Metal GPU)...")
 
@@ -142,7 +221,7 @@ class CattleDetectorMLX:
         self.model = MLX_YOLO(model_path)
         ok(f"[YOLO26-MLX] Modele pret (Metal GPU)")
 
-    def detect(self, frame, persist: bool = True, conf: float = 0.4, imgsz: int = 640):
+    def detect(self, frame, persist: bool = True, conf: float = 0.25, imgsz: int = 960):
         """Detecte + segmente les bovins. Retourne un objet compatible avec
         le format Ultralytics (boxes.xyxy, boxes.id, boxes.conf, masks).
 
@@ -185,21 +264,35 @@ class CattleDetectorMLX:
                 cls_all = np.array(boxes.cls) if boxes.cls is not None else None
                 conf_all = np.array(boxes.conf) if boxes.conf is not None else None
 
-                # Filtrer pour garder uniquement les 'cow' (cls == 19)
-                cow_mask = cls_all == self.COW_CLASS_ID if cls_all is not None else np.ones(len(xyxy_all), dtype=bool)
+                # Filtrer sur les classes assimilees a du betail (cf.
+                # CATTLE_CLASS_IDS : cow, et par defaut horse/sheep que COCO
+                # confond avec des bovins sur des vues de troupeau).
+                cow_mask = (
+                    np.isin(cls_all, self.classes)
+                    if cls_all is not None
+                    else np.ones(len(xyxy_all), dtype=bool)
+                )
                 if not cow_mask.any():
                     return _empty_result_mlx()
 
                 xyxy_cows = xyxy_all[cow_mask]
                 conf_cows = conf_all[cow_mask] if conf_all is not None else np.ones(len(xyxy_cows))
 
-                # Appliquer le tracker IoU sur les boxes de bovins uniquement
-                ids_cows = self._iou_tracker.update(xyxy_cows)
-
                 masks_data = None
                 if pred.masks is not None and pred.masks.data is not None:
                     masks_all = np.array(pred.masks.data)
                     masks_data = masks_all[cow_mask]
+
+                # Doublons imbriques : frequents des qu'on monte imgsz.
+                keep = dedup_boxes(xyxy_cows, conf_cows)
+                if len(keep) < len(xyxy_cows):
+                    xyxy_cows = xyxy_cows[keep]
+                    conf_cows = conf_cows[keep]
+                    if masks_data is not None:
+                        masks_data = masks_data[keep]
+
+                # Appliquer le tracker IoU sur les boxes de bovins uniquement
+                ids_cows = self._iou_tracker.update(xyxy_cows)
 
                 return _MLXResult(xyxy_cows, ids_cows, conf_cows, masks_data)
             except Exception as e:
@@ -325,34 +418,64 @@ def _empty_result_mlx():
     })()
 
 
+try:
+    from scipy.optimize import linear_sum_assignment as _hungarian
+    _SCIPY_OK = True
+except Exception:  # pragma: no cover - repli si scipy absent
+    _SCIPY_OK = False
+
+
+def _iou_matrix(dets: np.ndarray, tracks: np.ndarray) -> np.ndarray:
+    """Matrice IoU (n_det, n_track), vectorisee."""
+    if len(dets) == 0 or len(tracks) == 0:
+        return np.zeros((len(dets), len(tracks)), dtype=np.float32)
+    d = dets[:, None, :]
+    t = tracks[None, :, :]
+    x1 = np.maximum(d[..., 0], t[..., 0])
+    y1 = np.maximum(d[..., 1], t[..., 1])
+    x2 = np.minimum(d[..., 2], t[..., 2])
+    y2 = np.minimum(d[..., 3], t[..., 3])
+    inter = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
+    area_d = np.clip(d[..., 2] - d[..., 0], 0, None) * np.clip(d[..., 3] - d[..., 1], 0, None)
+    area_t = np.clip(t[..., 2] - t[..., 0], 0, None) * np.clip(t[..., 3] - t[..., 1], 0, None)
+    union = area_d + area_t - inter
+    return (inter / np.maximum(union, 1e-6)).astype(np.float32)
+
+
 class _SimpleIoUTracker:
-    """Tracker IoU simple pour YOLO26 MLX.
+    """Tracker par association IoU pour YOLO26 MLX.
 
     yolo26mlx.TrackerManager.update() perd les masques (il recree un Results
     sans masks quand il applique ByteTrack). Comme on ne peut pas utiliser
     track() pour avoir les masques, on utilise predict() et on maintient
-    nos propres IDs par IoU matching.
+    nos propres IDs.
 
-    Strategie:
-    - Pour chaque nouvelle detection, on cherche la box precedente avec
-      l'IoU le plus eleve.
-    - Si IoU > seuil, on conserve le meme ID.
-    - Sinon, on assigne un nouvel ID.
-    - Les tracks perdues depuis >max_lost frames sont retirees.
+    ASSOCIATION GLOBALE, PAS GLOUTONNE
+    ----------------------------------
+    L'association se fait par affectation optimale (Hongrois) sur toute la
+    matrice IoU, pas boite par boite. Dans un troupeau serre, l'appariement
+    glouton attribue la piste au PREMIER bovin qui la recouvre suffisamment,
+    même si un autre la recouvre bien mieux : les identites s'echangent entre
+    voisins, et le nom suit l'echange. L'affectation globale minimise le cout
+    total et supprime cette classe d'erreurs.
 
-    Note: ce tracker est basique mais fonctionne pour des sequences video
-    ou les bovins bougent peu entre frames consecutives. Pour du tracking
-    plus robuste (occlusions, mouvements rapides), il faudrait implementer
-    ByteTrack ou SORT/DeepSORT. Pour notre cas d'usage (vaches dans un
-    champ), c'est suffisant.
+    DEUXIEME PASSE, PLUS PERMISSIVE
+    -------------------------------
+    Les pistes non appariees au premier tour (bovin brievement masque, ou qui
+    s'est deplace vite) sont re-tentees avec un seuil IoU abaisse, en ne
+    considerant que les pistes recemment perdues. Sans cela, une occlusion
+    d'une seconde cree un nouvel identifiant — donc un nouveau nom en base.
+
+    Une piste perdue est conservee `max_lost` frames : elle peut reprendre son
+    identifiant en reapparaissant.
     """
 
-    def __init__(self, iou_threshold: float = 0.3, max_lost: int = 30):
+    def __init__(self, iou_threshold: float = 0.25, max_lost: int = 45):
         self.iou_threshold = iou_threshold
         self.max_lost = max_lost
         self._next_id = 1
-        # Liste de tuples (xyxy, track_id, frames_since_last_seen)
-        self._tracks = []
+        # Liste de dicts {box, id, lost}
+        self._tracks: list[dict] = []
 
     def _iou(self, box_a, box_b):
         """Calcule l'IoU entre deux boxes (format xyxy)."""
@@ -366,44 +489,74 @@ class _SimpleIoUTracker:
         union = area_a + area_b - inter
         return inter / union if union > 0 else 0.0
 
+    def _assign(self, iou: np.ndarray, threshold: float) -> list[tuple[int, int]]:
+        """Apparie detections et pistes. Retourne [(i_det, j_track), ...]."""
+        if iou.size == 0:
+            return []
+        pairs: list[tuple[int, int]] = []
+        if _SCIPY_OK:
+            rows, cols = _hungarian(-iou)  # maximise l'IoU total
+            for i, j in zip(rows, cols):
+                if iou[i, j] >= threshold:
+                    pairs.append((int(i), int(j)))
+            return pairs
+        # Repli glouton par IoU decroissante (scipy absent)
+        order = np.dstack(np.unravel_index(np.argsort(-iou, axis=None), iou.shape))[0]
+        used_d, used_t = set(), set()
+        for i, j in order:
+            i, j = int(i), int(j)
+            if iou[i, j] < threshold:
+                break
+            if i in used_d or j in used_t:
+                continue
+            used_d.add(i)
+            used_t.add(j)
+            pairs.append((i, j))
+        return pairs
+
     def update(self, xyxy_boxes):
         """Met a jour le tracker avec les nouvelles boxes. Retourne les IDs."""
+        dets = np.asarray(xyxy_boxes, dtype=np.float32).reshape(-1, 4)
+
         # Incrementer l'age des tracks existants
         for track in self._tracks:
             track["lost"] += 1
 
-        ids = []
-        used_track_indices = set()
+        ids = np.zeros(len(dets), dtype=np.int64)
+        if len(self._tracks) and len(dets):
+            track_boxes = np.array([t["box"] for t in self._tracks], dtype=np.float32)
+            iou = _iou_matrix(dets, track_boxes)
 
-        for box in xyxy_boxes:
-            best_iou = 0.0
-            best_idx = -1
+            pairs = self._assign(iou, self.iou_threshold)
+            matched_d = {i for i, _ in pairs}
+            matched_t = {j for _, j in pairs}
 
-            for idx, track in enumerate(self._tracks):
-                if idx in used_track_indices:
-                    continue
-                iou = self._iou(box, track["box"])
-                if iou > best_iou:
-                    best_iou = iou
-                    best_idx = idx
+            # Seconde passe : seuil abaisse, uniquement sur les pistes
+            # recemment perdues (un bovin qui reapparait apres occlusion).
+            free_d = [i for i in range(len(dets)) if i not in matched_d]
+            free_t = [j for j in range(len(self._tracks))
+                      if j not in matched_t and self._tracks[j]["lost"] > 1]
+            if free_d and free_t:
+                sub = iou[np.ix_(free_d, free_t)]
+                pairs += [(free_d[i], free_t[j])
+                          for i, j in self._assign(sub, self.iou_threshold * 0.5)]
 
-            if best_iou >= self.iou_threshold and best_idx >= 0:
-                # Match: conserver l'ID existant
-                track = self._tracks[best_idx]
-                track["box"] = box
+            # Applique les appariements retenus
+            for i, j in pairs:
+                track = self._tracks[j]
+                track["box"] = dets[i]
                 track["lost"] = 0
-                ids.append(track["id"])
-                used_track_indices.add(best_idx)
-            else:
-                # Nouvelle detection
+                ids[i] = track["id"]
+
+        # Detections non appariees -> nouvelles pistes
+        for i in range(len(dets)):
+            if ids[i] == 0:
                 new_id = self._next_id
                 self._next_id += 1
-                self._tracks.append({"box": box, "id": new_id, "lost": 0})
-                ids.append(new_id)
+                self._tracks.append({"box": dets[i], "id": new_id, "lost": 0})
+                ids[i] = new_id
 
         # Nettoyer les tracks perdues depuis trop longtemps
-        self._tracks = [
-            t for t in self._tracks if t["lost"] <= self.max_lost
-        ]
+        self._tracks = [t for t in self._tracks if t["lost"] <= self.max_lost]
 
-        return np.array(ids, dtype=np.int64)
+        return ids

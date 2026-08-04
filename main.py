@@ -35,8 +35,11 @@ def parse_args():
                    help="Modèle YOLO (yolo11n/s/m/l/x.pt ou votre .pt fine-tuné)")
     p.add_argument("--reid-model", type=str, default="hf-hub:BVRA/MegaDescriptor-T-224",
                    help="Backbone re-ID (timm/HF hub). T-224 rapide, L-384 précis.")
-    p.add_argument("--conf", type=float, default=0.4,
-                   help="Seuil de confiance YOLO")
+    p.add_argument("--conf", type=float, default=0.25,
+                   help="Seuil de confiance YOLO (0.25 = troupeau serre)")
+    p.add_argument("--imgsz", type=int, default=1280,
+                   help="Taille d'inference YOLO. 1280 = rappel max sur les "
+                        "bovins d'arriere-plan, 640 = max FPS.")
     p.add_argument("--no-save", action="store_true",
                    help="Ne pas sauvegarder la base à la fin")
     return p.parse_args()
@@ -109,7 +112,9 @@ def main():
                 break
 
             # Détection + tracking
-            result = detector.detect(frame, persist=True, conf=args.conf)
+            result = detector.detect(
+                frame, persist=True, conf=args.conf, imgsz=args.imgsz,
+            )
             annotated = frame.copy()
 
             if result.boxes is not None and result.boxes.id is not None:

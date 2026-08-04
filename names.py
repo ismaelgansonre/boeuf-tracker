@@ -61,6 +61,61 @@ NAME_POOL = [
     "Ivresse", "Jade", "Krystal", "Lune", "Mirage",
     "Neptune", "Onyx", "Perle", "Quartz", "Rubis",
     "Saphir", "Topaze", "Umbra", "Vega", "Whisky",
+    # ─────────────────────────────────────────────────────────────────
+    # AJOUTS — uniquement EN FIN DE LISTE.
+    # Le nom d'un bovin est NAME_POOL[numero_de_cle - 1] : inserer ou
+    # reordonner un nom ci-dessus renommerait retroactivement des animaux
+    # deja en base. On ne fait qu'ajouter a la suite.
+    #
+    # Motif de l'ajout : au-dela de 120 bovins, le generateur repassait sur
+    # le debut du pool avec un suffixe de cycle ("Daphne 2"), ce qui rendait
+    # les etiquettes ambigues a l'ecran sur les sequences a gros troupeau.
+    # ─────────────────────────────────────────────────────────────────
+    # Europeens (FR/IT/EN/DE/ES) — suite
+    "Amandine", "Barnabe", "Capucine", "Delphine", "Edmond",
+    "Fantine", "Gaspard", "Honorine", "Isidore", "Jacinthe",
+    "Ludivine", "Maximilien", "Noemie", "Octave", "Philomene",
+    "Raphaelle", "Severin", "Tancrede", "Urbain", "Violette",
+    "Adelaide", "Bertrand", "Clarisse", "Dagobert", "Emeline",
+    "Firmin", "Gwendoline", "Hubert", "Isaline", "Jonathan",
+    "Ombeline", "Prosper", "Ronan", "Solange", "Thibault",
+    "Ariane", "Basile", "Cyprien", "Doriane", "Elouan",
+    "Faustine", "Gaetan", "Heloise", "Ismerie", "Jocelyn",
+    "Ludwig", "Melusine", "Nathanael", "Odilon", "Perrine",
+    "Amadeo", "Bianca", "Corrado", "Donatella", "Ermanno",
+    "Fiorella", "Giacomo", "Ilaria", "Lorenzo", "Marcella",
+    "Nerio", "Ottavia", "Piero", "Rosalba", "Silvana",
+    "Alwin", "Brunhild", "Detlef", "Elfriede", "Gunther",
+    "Ingrid", "Konrad", "Liesel", "Meinhard", "Ottilie",
+    "Alonso", "Benita", "Cristobal", "Dolores", "Esteban",
+    "Fermina", "Gonzalo", "Inmaculada", "Joaquin", "Lucero",
+    # Africains (Wolof, Bambara, Peul, Yoruba, Swahili, Amharique, Zoulou)
+    "Abdoulaye", "Adama", "Awa", "Bakary", "Coumba",
+    "Demba", "Diarra", "Fanta", "Gorgui", "Hamidou",
+    "Ibrahima", "Kandia", "Lamine", "Maimouna", "Modou",
+    "Ndeye", "Oumou", "Penda", "Sadio", "Seydou",
+    "Sokhna", "Souleymane", "Tacko", "Woury", "Yande",
+    "Adjoa", "Afua", "Akosua", "Ama", "Esi",
+    "Kofi", "Kojo", "Kwabena", "Kwame", "Yaa",
+    "Abeni", "Adebayo", "Ayodele", "Babatunde", "Bolanle",
+    "Chidi", "Ebele", "Emeka", "Ifeanyi", "Ngozi",
+    "Nkechi", "Obiageli", "Olamide", "Simisola", "Temitope",
+    "Amani", "Baraka", "Imani", "Jabari", "Jamila",
+    "Kesi", "Malaika", "Neema", "Rehema", "Salama",
+    "Simba", "Subira", "Tumaini", "Zuri", "Bahati",
+    "Abeba", "Alemu", "Bekele", "Desta", "Genet",
+    "Kidist", "Meseret", "Selam", "Tesfaye", "Yohannes",
+    "Bongani", "Buhle", "Lindiwe", "Nomsa", "Sipho",
+    "Thabo", "Thandeka", "Zanele", "Zodwa", "Ayanda",
+    # Robe, terroir et elements — faciles a retenir a l'oral en stabulation
+    "Ardoise", "Bruyere", "Cannelle", "Cendre", "Chataigne",
+    "Comete", "Corail", "Duvet", "Ebene", "Etoile",
+    "Fougere", "Framboise", "Genievre", "Grelot", "Hirondelle",
+    "Iris", "Isatis", "Lavande", "Lichen", "Malachite",
+    "Mousseline", "Myrtille", "Nacre", "Noisette", "Obsidienne",
+    "Orage", "Pastel", "Pivoine", "Reglisse", "Rosee",
+    "Sarrasin", "Sequoia", "Silex", "Sorbier", "Tourbe",
+    "Tramontane", "Turquoise", "Vanille", "Verveine", "Zephyrine",
 ]
 
 

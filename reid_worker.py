@@ -44,8 +44,10 @@ class ReIDWorker:
         emb_by_idx = worker.collect_ready()          # non-bloquant, peut être vide
     """
 
-    def __init__(self, reid_engine, max_queue: int = 64):
+    def __init__(self, reid_engine, max_queue: int = 2, max_batch: int = 12):
         self.reid = reid_engine
+        self.max_batch = max_batch
+        # File COURTE et volontairement remplacable (cf. submit_batch).
         self._queue: queue.Queue = queue.Queue(maxsize=max_queue)
         self._lock = threading.Lock()
         # {det_idx: embedding} — résultats disponibles, accès protégé
@@ -79,23 +81,57 @@ class ReIDWorker:
             warn(f"[ReIDWorker] thread crashé, fallback synchrone: {e}")
             self._failed = True
 
-    def submit_batch(self, batch: dict[int, np.ndarray]) -> bool:
-        """Soumet un batch de crops. Non-bloquant : si la queue est pleine,
-        on drop silencieusement (les crops seront re-soumis à la frame suivante).
+    def submit_batch(
+        self,
+        batch: dict[int, np.ndarray],
+        priority_ids: set[int] | None = None,
+    ) -> bool:
+        """Soumet un batch de crops. Non-bloquant.
 
-        batch: {det_idx: crop_bgr}
-        Retourne True si accepté, False si dropped.
+        batch: {track_id: crop_bgr}
+        priority_ids: pistes sans nom, à traiter en premier.
+
+        LE DERNIER SOUMIS GAGNE
+        -----------------------
+        Avec une file longue, un troupeau nombreux la remplissait de batches
+        successifs : le worker traitait des imagettes vieilles de plusieurs
+        secondes pendant que les nouvelles étaient rejetées. Résultat visible à
+        l'écran — des bovins qui restaient étiquetés "?" indéfiniment alors
+        qu'ils étaient bien détectés.
+
+        La file est donc courte, et un batch en attente est REMPLACÉ par le
+        plus récent : un crop périmé n'a aucune valeur, le bovin est toujours
+        là à la frame suivante.
+
+        BORNE SUR LA TAILLE DU BATCH
+        ----------------------------
+        Le forward est découpé à `max_batch` imagettes, en servant d'abord les
+        pistes anonymes. Un batch de 25 bloque le worker ~0.5 s ; deux batches
+        de 12 rendent le premier résultat deux fois plus vite, et ce sont les
+        nouveaux arrivants qui en profitent.
+
+        Retourne True si accepté, False si le worker est hors service.
         """
         if self._failed:
             return False
         if not batch:
             return True
+
         items = list(batch.items())
-        try:
-            self._queue.put_nowait((None, items))
-            return True
-        except queue.Full:
-            return False
+        if priority_ids:
+            items.sort(key=lambda kv: kv[0] not in priority_ids)
+        items = items[:self.max_batch]
+
+        while True:
+            try:
+                self._queue.put_nowait((None, items))
+                return True
+            except queue.Full:
+                try:
+                    # Évince le batch le plus ancien au profit de celui-ci.
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    pass  # vidée entre-temps par le worker : on retente
 
     def collect_ready(self) -> dict[int, np.ndarray]:
         """Récupère et vide les résultats disponibles. Non-bloquant.

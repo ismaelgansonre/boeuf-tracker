@@ -84,6 +84,111 @@ def test_analyzer_smoothing_absorbs_flicker():
     assert out[0]["action"] == "immobile"
 
 
+# ─── Couché / rumine / transitions ──────────────────────────
+def test_classifier_lying_flag_wins_over_head_down(clf):
+    """Régression : un bovin couché lève head_down (large plage au sol) et
+    était étiqueté "pâture". `lying` doit primer."""
+    assert clf.classify(0.0, 1.2, 0.4, 2.0, lying=True, head_down=True) == "couché"
+
+
+def test_classifier_head_down_gives_pature(clf):
+    assert clf.classify(0.0, 1.2, 0.4, 2.0, head_down=True) == "pâture"
+
+
+def test_classifier_lying_long_immobility_is_rumination(clf):
+    assert clf.classify(0.0, 1.2, 0.4, 60.0, lying=True) == "rumine"
+
+
+def test_classifier_standing_long_immobility_is_rumination(clf):
+    assert clf.classify(0.0, 1.2, 0.4, 60.0) == "rumine"
+
+
+def test_classifier_short_immobility_stays_immobile(clf):
+    assert clf.classify(0.0, 1.2, 0.4, 2.0) == "immobile"
+
+
+def test_analyzer_lying_flag_produces_couche():
+    a = BehaviorAnalyzer(track_history={}, track_names={1: "X"},
+                         head_down_flags={1: True}, lying_flags={1: True})
+    box = [100.0, 100.0, 400.0, 300.0]
+    for t in (0.0, 0.5, 1.0):
+        out = a.analyze([box], [1], t, (600, 800))
+    assert out[0]["action"] == "couché"
+    assert out[0]["posture"] == "couché"
+
+
+def test_analyzer_reports_standing_posture():
+    a = BehaviorAnalyzer(track_history={}, track_names={1: "X"})
+    box = [100.0, 100.0, 300.0, 400.0]
+    for t in (0.0, 0.5, 1.0):
+        out = a.analyze([box], [1], t, (600, 800))
+    assert out[0]["posture"] == "debout"
+
+
+def test_analyzer_emits_lie_down_then_stand_up():
+    lying = {}
+    # transition_cooldown_s abaissé : on teste ici la mécanique de transition,
+    # pas le réarmement anti-rebond (testé séparément).
+    a = BehaviorAnalyzer(track_history={}, track_names={1: "X"},
+                         lying_flags=lying, transition_hold_s=0.1,
+                         transition_cooldown_s=1.0)
+    box = [100.0, 100.0, 400.0, 300.0]
+    for t in (0.0, 0.5, 1.0):
+        a.analyze([box], [1], t, (600, 800))
+    lying[1] = True
+    assert a.analyze([box], [1], 1.5, (600, 800))[0]["action"] == "se couche"
+    lying[1] = False
+    assert a.analyze([box], [1], 3.0, (600, 800))[0]["action"] == "se lève"
+
+
+def test_analyzer_transition_cooldown_suppresses_flapping():
+    """Un drapeau `lying` qui oscille autour de l'hystérésis ne doit pas
+    redéclencher "se couche"/"se lève" à chaque flip : une seule transition
+    est émise par fenêtre de `transition_cooldown_s`."""
+    lying = {}
+    a = BehaviorAnalyzer(track_history={}, track_names={1: "X"},
+                         lying_flags=lying, transition_hold_s=0.1,
+                         transition_cooldown_s=5.0)
+    box = [100.0, 100.0, 400.0, 300.0]
+    for t in (0.0, 0.5, 1.0):
+        a.analyze([box], [1], t, (600, 800))
+    lying[1] = True
+    assert a.analyze([box], [1], 1.5, (600, 800))[0]["action"] == "se couche"
+    # Flips rapprochés (bruit) : aucune nouvelle transition ne doit sortir.
+    lying[1] = False
+    assert a.analyze([box], [1], 2.0, (600, 800))[0]["action"] != "se lève"
+    lying[1] = True
+    assert a.analyze([box], [1], 2.5, (600, 800))[0]["action"] != "se couche"
+
+
+def test_analyzer_transition_survives_majority_smoothing():
+    """La transition est brève : le vote majoritaire l'effacerait sans le
+    maintien explicite de `transition_hold_s`."""
+    lying = {}
+    a = BehaviorAnalyzer(track_history={}, track_names={1: "X"},
+                         lying_flags=lying, smoothing_window=7,
+                         transition_hold_s=3.0)
+    box = [100.0, 100.0, 400.0, 300.0]
+    for t in (0.0, 0.5, 1.0):
+        a.analyze([box], [1], t, (600, 800))
+    lying[1] = True
+    a.analyze([box], [1], 1.5, (600, 800))
+    out = a.analyze([box], [1], 2.0, (600, 800))     # frame suivante
+    assert out[0]["action"] == "se couche"
+
+
+def test_immobile_duration_is_not_capped_by_history_window():
+    """Régression : la durée d'immobilité était déduite de `track_history`,
+    élagué à 5 s — aucun seuil de rumination n'était atteignable."""
+    a = BehaviorAnalyzer(track_history={}, track_names={1: "X"},
+                         history_window_s=5.0)
+    box = [100.0, 100.0, 300.0, 400.0]
+    out = None
+    for t in np.arange(0.0, 40.0, 0.5):
+        out = a.analyze([box], [1], float(t), (600, 800))
+    assert out[0]["action"] == "rumine"
+
+
 def test_analyzer_forget_track_frees_buffer():
     a = BehaviorAnalyzer(track_history={})
     box = [100.0, 100.0, 300.0, 400.0]

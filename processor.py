@@ -27,6 +27,7 @@ from behavior import (
     NUMBA_OK as _NUMBA_OK,
 )
 from posture import MaskHeadAnalyzer, HeadMotionTracker, overlap_fractions
+from posture_model import PostureModel
 
 # Marge de similarite requise pour retirer un nom a la piste qui le porte.
 # Trop bas -> les noms sautent d'une piste a l'autre ; trop haut -> le vrai
@@ -35,6 +36,24 @@ REASSIGN_MARGIN = 0.05
 # Au-dela de cette fraction de recouvrement par un congenere, l'imagette est
 # consideree polluee : on ne s'en sert pas pour mettre a jour l'empreinte.
 OCCLUSION_SKIP_FRAC = 0.25
+# Distance au bord bas de l'image en deca de laquelle on considere la
+# silhouette tronquee (pattes hors champ) — cf. posture.MaskHeadAnalyzer.
+BOTTOM_EDGE_MARGIN_PX = 4
+# Cote minimal d'une imagette exploitable par la re-identification, en pixels.
+# 24 px excluait les bovins d'arriere-plan que la montee de `imgsz` fait
+# justement apparaitre : ils etaient detectes mais jamais nommes ni annotes.
+MIN_CROP_SIDE_PX = 16
+# Age minimal (en frames vues) d'une piste avant de pouvoir CREER une nouvelle
+# identite en base. Les pistes ephemeres (doublon de detection, artefact d'une
+# poignee de frames) creaient chacune un bovin fantome : mesure sur
+# samples/IMG_3544, 32 identites pour ~12 animaux reels. Une piste jeune reste
+# "?" ; le rattachement a un bovin DEJA connu, lui, est immediat.
+MIN_NEW_ID_AGE_FRAMES = 12
+# Avant de creer une identite, on retente un appariement au seuil abaisse de
+# cette marge, restreint aux bovins hors champ : mieux vaut rattacher une
+# piste a un animal connu legerement different (angle, lumiere) que gonfler
+# le comptage avec un doublon.
+SECOND_CHANCE_DELTA = 0.10
 if not _NUMBA_OK:  # pragma: no cover
     warn("[Numba] non installé — JIT désactivé, comportement ×5-10 plus lent. "
          "pip install numba")
@@ -116,12 +135,16 @@ _analyzer = BehaviorAnalyzer(
     track_history=STATE["track_history"],
     track_names=STATE.setdefault("_track_names", {}),
     head_down_flags=STATE.setdefault("_head_down", {}),
+    lying_flags=STATE.setdefault("_lying", {}),
 )
 _isolation = IsolationMonitor(journal=_journal)
 _transitions = TransitionMonitor(journal=_journal)
 # Posture : detection tete-au-sol depuis le masque + persistance temporelle
 _head_analyzer = MaskHeadAnalyzer()
 _head_motion = HeadMotionTracker()
+# Classifieur de posture appris (posture_clf.pkl). Absent au premier lancement :
+# _posture_model.ok == False et tout le pipeline reste sur les regles.
+_posture_model = PostureModel()
 
 
 def analyze_behavior(boxes, track_ids, t_now, frame_shape=None):
@@ -130,6 +153,7 @@ def analyze_behavior(boxes, track_ids, t_now, frame_shape=None):
     _analyzer.track_history = STATE["track_history"]
     _analyzer.track_names = STATE.get("_track_names", {})
     _analyzer.head_down_flags = STATE.get("_head_down", {})
+    _analyzer.lying_flags = STATE.get("_lying", {})
     return _analyzer.analyze(boxes, track_ids, t_now, frame_shape)
 
 
@@ -253,6 +277,13 @@ def detection_loop(args):
     # Auto-détection : si MLX est dispo et qu'on est en mode "auto", on
     # l'utilise automatiquement (backend natif le plus rapide). On bascule
     # aussi le modèle par défaut vers le modèle MLX si nécessaire.
+    # Classes COCO acceptees comme bovin (cf. detector.CATTLE_CLASS_IDS).
+    extra_classes = not getattr(args, "no_extra_classes", False)
+    if extra_classes:
+        info("[Init] Classes acceptees: cow + horse + sheep "
+             "(COCO confond ces classes sur les vues de troupeau). "
+             "--no-extra-classes pour n'accepter que 'cow'.")
+
     use_mlx = getattr(args, "mlx", False)
     if not use_mlx and args.device in ("auto", "mlx") and _mlx_available():
         # Vérifier qu'un modèle MLX (.safetensors ou yolo26) est disponible
@@ -301,9 +332,14 @@ def detection_loop(args):
         info(f"[YOLO26-MLX] Utilisation de CattleDetectorMLX...")
         # When --mlx, use yolo26s-seg.safetensors (or the user-specified model)
         mlx_model = args.yolo_model if args.yolo_model != "yolo11s-seg.pt" else "yolo26s-seg.safetensors"
-        detector = CattleDetectorMLX(model_name=mlx_model, device="mlx")
+        detector = CattleDetectorMLX(
+            model_name=mlx_model, device="mlx", extra_classes=extra_classes,
+        )
     else:
-        detector = CattleDetector(model_name=args.yolo_model, device=device)
+        detector = CattleDetector(
+            model_name=args.yolo_model, device=device,
+            extra_classes=extra_classes,
+        )
     reid = CattleReID(model_name=args.reid_model, device=reid_device)
     # DB PAR VIDÉO : utilise le chemin de DB correspondant à la source
     # initiale, pas un fichier générique. Chaque vidéo a sa propre DB.
@@ -374,6 +410,12 @@ def detection_loop(args):
     track_id_to_name = {}
     STATE["_track_names"] = track_id_to_name  # pour behavior
     track_emb_accum = {}
+    # Nombre de frames ou chaque piste a ete vue (garde d'age anti-fantome).
+    track_age: dict[int, int] = {}
+    # Dernier embedding connu par piste : sert au classifieur de posture appris,
+    # qui doit pouvoir statuer meme sur les frames ou aucun embedding n'a ete
+    # recalcule (le re-embedding n'a lieu que toutes les `embed_every` frames).
+    track_last_emb: dict[int, np.ndarray] = {}
     # Similarite a laquelle chaque piste a revendique son nom. Sert d'arbitre
     # quand deux pistes revendiquent le meme bovin dans une frame.
     track_claim_sim: dict[int, float] = {}
@@ -460,11 +502,16 @@ def detection_loop(args):
                 # Choisit le bon detecteur selon le type de fichier
                 is_mlx_model = d.endswith(".safetensors") or d.startswith("yolo26")
                 if is_mlx_model:
-                    new_det = CattleDetectorMLX(model_name=d, device="mlx")
+                    new_det = CattleDetectorMLX(
+                        model_name=d, device="mlx", extra_classes=extra_classes,
+                    )
                 else:
                     # Convertit le device MLX en device PyTorch compatible (mps/cpu)
                     pt_device = resolve_device("auto", for_pytorch=True)
-                    new_det = CattleDetector(model_name=d, device=pt_device, half=False)
+                    new_det = CattleDetector(
+                        model_name=d, device=pt_device, half=False,
+                        extra_classes=extra_classes,
+                    )
                 detector = new_det
                 STATE["yolo_model_current"] = d
                 STATE["desired_yolo_model"] = None
@@ -504,6 +551,8 @@ def detection_loop(args):
                         STATE["source_label"] = source_label(new_src)
                         track_id_to_name.clear()
                         track_emb_accum.clear()
+                        track_age.clear()
+                        track_last_emb.clear()
                         STATE["_track_names"] = track_id_to_name
                         reset_for_new_source()
                         # DB PAR VIDÉO : au lieu de vider la DB, on recharge
@@ -544,6 +593,8 @@ def detection_loop(args):
                     STATE["events"] = STATE["events"][:30]
                     track_id_to_name.clear()
                     track_emb_accum.clear()
+                    track_age.clear()
+                    track_last_emb.clear()
                     STATE["_track_names"] = track_id_to_name
 
                 t0 = time.time()
@@ -586,6 +637,8 @@ def detection_loop(args):
                         STATE["events"] = STATE["events"][:30]
                         track_id_to_name.clear()
                         track_emb_accum.clear()
+                        track_age.clear()
+                        track_last_emb.clear()
                         STATE["_track_names"] = track_id_to_name
                         loop_detected_at_frame = frame_idx
                     if cur_pos > 0:
@@ -638,9 +691,10 @@ def detection_loop(args):
                         x1, y1, x2, y2 = map(int, box)
                         x1, y1 = max(0, x1), max(0, y1)
                         x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
-                        if (x2 - x1) < 24 or (y2 - y1) < 24:
+                        if (x2 - x1) < MIN_CROP_SIDE_PX or (y2 - y1) < MIN_CROP_SIDE_PX:
                             continue
                         det_idx_to_tid[det_idx] = int(tid)
+                        track_age[int(tid)] = track_age.get(int(tid), 0) + 1
                         crop = frame[y1:y2, x1:x2]
                         # "?" = en attente d'embedding (worker pas encore prêt).
                         # On le traite comme un nouveau track pour le re-soumettre.
@@ -671,17 +725,32 @@ def detection_loop(args):
                             if e is not None and e.shape[0] == expected_dim:
                                 emb_by_tid[tid] = e
                     else:
-                        # Soumet les crops au worker, clé = track_id (non-bloquant)
-                        reid_worker.submit_batch(crops_to_submit)
+                        # Soumet les crops au worker, clé = track_id (non-bloquant).
+                        # Les pistes encore anonymes passent devant : leur
+                        # embedding conditionne l'affichage d'un nom, alors
+                        # qu'un re-embedding EMA peut attendre une frame.
+                        reid_worker.submit_batch(
+                            crops_to_submit,
+                            priority_ids={
+                                det_idx_to_tid[i] for i in new_track_indices
+                                if i in det_idx_to_tid
+                            },
+                        )
                         # Récupère ce qui est prêt (non-bloquant, peut être vide)
                         emb_by_tid = reid_worker.collect_ready()
+
+                    # Cache du dernier embedding par piste : consommé plus bas
+                    # par le classifieur de posture appris, qui doit statuer meme
+                    # sur les frames sans re-embedding.
+                    for _tid_e, _emb_e in emb_by_tid.items():
+                        track_last_emb[int(_tid_e)] = _emb_e
 
                     # Phase 3: matching / EMA / annotation
                     for det_idx, (box, tid, conf) in enumerate(zip(boxes, track_ids, confs)):
                         x1, y1, x2, y2 = map(int, box)
                         x1, y1 = max(0, x1), max(0, y1)
                         x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
-                        if (x2 - x1) < 24 or (y2 - y1) < 24:
+                        if (x2 - x1) < MIN_CROP_SIDE_PX or (y2 - y1) < MIN_CROP_SIDE_PX:
                             continue
                         tid_int = int(tid)
 
@@ -735,8 +804,28 @@ def detection_loop(args):
                                             threshold=eff_threshold,
                                             exclude=frame_names,
                                         )
-                                event = None
                                 if name is None:
+                                    # Seconde chance au seuil abaisse, limitee
+                                    # aux bovins hors champ : un animal deja
+                                    # connu revu sous un autre angle matche
+                                    # souvent juste sous le seuil ; le
+                                    # rattacher evite de creer un doublon.
+                                    relax = max(0.30, eff_threshold - SECOND_CHANCE_DELTA)
+                                    name, sim = db.match(
+                                        emb, threshold=relax, exclude=frame_names,
+                                    )
+                                event = None
+                                if name is None and (
+                                        track_age.get(tid_int, 0)
+                                        < MIN_NEW_ID_AGE_FRAMES):
+                                    # Piste trop jeune pour creer une identite :
+                                    # les pistes ephemeres (artefact, doublon)
+                                    # creaient chacune un bovin fantome en base
+                                    # -> sur-comptage. Elle reste "?" et sera
+                                    # re-tentee aux frames suivantes.
+                                    track_id_to_name[tid_int] = "?"
+                                    STATE["_track_names"] = track_id_to_name
+                                elif name is None:
                                     # Cle unique via compteur global persistant :
                                     # garantit que les noms ne sont JAMAIS
                                     # reutilises, meme apres un reset de DB.
@@ -782,11 +871,12 @@ def detection_loop(args):
                                         "text": f"{proper_name} de retour dans le champ",
                                         "ts": time.time(),
                                     }
-                                track_id_to_name[int(tid)] = name
-                                track_emb_accum[int(tid)] = [emb]
-                                track_claim_sim[tid_int] = float(sim)
-                                STATE["_track_names"] = track_id_to_name
-                                frame_names.add(name)
+                                if name is not None:
+                                    track_id_to_name[int(tid)] = name
+                                    track_emb_accum[int(tid)] = [emb]
+                                    track_claim_sim[tid_int] = float(sim)
+                                    STATE["_track_names"] = track_id_to_name
+                                    frame_names.add(name)
                                 if event:
                                     push_user_event(
                                         event["kind"], event["text"],
@@ -900,6 +990,7 @@ def detection_loop(args):
                     # contrairement a l'aspect ratio qui echoue en vue laterale.
                     # Le verdict est ensuite lisse temporellement par tid.
                     head_down_by_tid = {}
+                    lying_by_tid = {}
                     _active_tids = set()
                     if masks_data is not None:
                         _H, _W = frame.shape[:2]
@@ -914,14 +1005,42 @@ def detection_loop(args):
                                 _x1, _y1, _x2, _y2 = boxes[_i].astype(int)
                                 _roi = (_mr > 0.5)[max(0, _y1):min(_H, _y2),
                                                    max(0, _x1):min(_W, _x2)]
-                                _state = _head_analyzer.analyze(_roi)
+                                # Bas de silhouette non observable : boite
+                                # coupee par le bord de l'image, ou animal
+                                # largement masque par un congenere. Dans les
+                                # deux cas la bande basse est pleine sans que
+                                # l'animal soit couche -> on l'indique a
+                                # l'analyseur pour qu'il s'abstienne.
+                                _truncated = (
+                                    _y2 >= _H - BOTTOM_EDGE_MARGIN_PX
+                                    or (_i < len(occl_frac)
+                                        and occl_frac[_i] > OCCLUSION_SKIP_FRAC)
+                                )
+                                _state = _head_analyzer.analyze(
+                                    _roi, truncated_bottom=bool(_truncated),
+                                )
                                 head_down_by_tid[_tid_i] = _head_motion.update(
                                     _tid_i, _state,
                                 )
+                                lying_by_tid[_tid_i] = _head_motion.is_lying(_tid_i)
+
+                                # Classifieur appris : prime sur les regles UNIQUEMENT
+                                # s'il est charge, active, et suffisamment sur (sinon
+                                # predict renvoie None et on garde le verdict ci-dessus).
+                                # Corrige les cas ou la geometrie du masque echoue
+                                # (bovin noir sur sol sombre, vue de face...).
+                                if (_posture_model.ok
+                                        and STATE.get("use_posture_model", True)):
+                                    _pred = _posture_model.predict(
+                                        track_last_emb.get(_tid_i)
+                                    )
+                                    if _pred is not None:
+                                        lying_by_tid[_tid_i], head_down_by_tid[_tid_i] = _pred
                             except Exception:
                                 pass
                         _head_motion.prune(_active_tids)
                     STATE["_head_down"] = head_down_by_tid
+                    STATE["_lying"] = lying_by_tid
                     STATE["behavior"] = analyze_behavior(boxes, track_ids, time.time(), frame.shape)
                     emit_behavior_transitions(STATE["behavior"])
                     emit_isolation_alerts(boxes, track_ids, frame.shape)

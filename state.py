@@ -68,10 +68,15 @@ STATE = {
     "desired_threshold": None,    # nouveau seuil cosine
     "desired_conf": None,         # nouvelle confiance YOLO
     "yolo_model_current": "",     # modele YOLO actif
-    "imgsz_current": 640,
+    # Reglages d'inference par defaut. Cf. app.py pour la justification des
+    # valeurs : 640/0.40 ne detectait qu'une fraction d'un troupeau serre.
+    "imgsz_current": 1280,
     "embed_every_current": 10,
     "threshold_current": 0.70,
-    "conf_current": 0.4,
+    "conf_current": 0.25,
+    # Drapeaux de posture par piste, alimentes par posture.py
+    "_head_down": {},
+    "_lying": {},
     "ui_dir": "web/public",       # repertoire de l'UI statique (sert sans Bun)
     "models_available": [
         # YOLO26 MLX (Metal GPU Apple Silicon - recommandee)
@@ -92,5 +97,10 @@ def reset_for_new_source():
         STATE["active_animals"] = []
         STATE["behavior"] = []
     STATE["track_history"].clear()
+    # Les drapeaux de posture sont indexes par track_id : les conserver ferait
+    # heriter la posture d'un bovin de la source precedente au premier bovin
+    # de la nouvelle (les identifiants de piste repartent de 1).
+    STATE.get("_head_down", {}).clear()
+    STATE.get("_lying", {}).clear()
     STATE["events"].insert(0, "TRACKER reset")
     STATE["events"] = STATE["events"][:30]
