@@ -52,7 +52,7 @@ web/node_modules/
 web/bun.lock
 web/data/
 web/dist/
-
+~/Desktop/GIT/boeuf-tracker/external/*
 # Tauri / Rust (build artifacts volumineux)
 src-tauri/target/
 src-tauri/gen/
