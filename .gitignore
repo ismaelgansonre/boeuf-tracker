@@ -22,6 +22,15 @@ screenshot_*.jpg
 videos/
 data/
 
+# Datasets externes (téléchargés via training/download_roboflow.py — 31 Go, jamais versionnés)
+external/
+*.zip
+
+# Datasets & backups d'entraînement (images lourdes ; le code training/*.py reste tracké)
+training/dataset/
+training/_img_excluded/
+training/_video_crops_backup/
+
 # HuggingFace model cache
 .cache/
 models/*.pt

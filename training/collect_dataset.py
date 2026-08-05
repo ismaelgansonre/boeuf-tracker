@@ -178,6 +178,11 @@ def main():
     ap.add_argument("--max-per-track", type=int, default=40)
     ap.add_argument("--imgsz", type=int, default=960)
     ap.add_argument("--conf", type=float, default=0.25)
+    # collect_dataset ajoute TOUJOURS au dataset existant (il recharge
+    # embeddings.pkl et écrit dans les dossiers sans les vider). --append est
+    # accepté pour cohérence avec import_external, mais c'est déjà le comportement.
+    ap.add_argument("--append", action="store_true",
+                    help="(déjà le comportement par défaut) ajoute au dataset existant")
     args = ap.parse_args()
     collect(args.videos, args.out, args.every, args.max_per_track,
             args.imgsz, args.conf)
