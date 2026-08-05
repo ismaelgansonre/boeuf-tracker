@@ -28,6 +28,7 @@ from behavior import (
 )
 from posture import MaskHeadAnalyzer, HeadMotionTracker, overlap_fractions
 from posture_model import PostureModel
+from behavior_video import VideoBehavior
 
 # Marge de similarite requise pour retirer un nom a la piste qui le porte.
 # Trop bas -> les noms sautent d'une piste a l'autre ; trop haut -> le vrai
@@ -145,6 +146,12 @@ _head_motion = HeadMotionTracker()
 # Classifieur de posture appris (posture_clf.pkl). Absent au premier lancement :
 # _posture_model.ok == False et tout le pipeline reste sur les regles.
 _posture_model = PostureModel()
+
+# Comportement vidéo (R(2+1)D-18 entraîné sur CVB). Optionnel : si
+# behavior_video.pt est absent, _video_behavior.available == False et rien
+# ne change. En CPU par sécurité (la conv 3D plante sur MPS) + inférence
+# espacée (every=16) pour ne pas bloquer la boucle vidéo.
+_video_behavior = VideoBehavior(device="cpu", every=16)
 
 
 def analyze_behavior(boxes, track_ids, t_now, frame_shape=None):
@@ -686,6 +693,8 @@ def detection_loop(args):
                     # et ne peut pas servir de clé pour le worker asynchrone.
                     crops_to_submit: dict[int, np.ndarray] = {}  # {track_id: crop}
                     det_idx_to_tid: dict[int, int] = {}
+                    # Comportement vidéo courant par piste (rempli ci-dessous)
+                    video_beh_by_tid: dict[int, str] = {}
 
                     for det_idx, (box, tid, conf) in enumerate(zip(boxes, track_ids, confs)):
                         x1, y1, x2, y2 = map(int, box)
@@ -696,6 +705,11 @@ def detection_loop(args):
                         det_idx_to_tid[det_idx] = int(tid)
                         track_age[int(tid)] = track_age.get(int(tid), 0) + 1
                         crop = frame[y1:y2, x1:x2]
+                        # Nourrit le buffer 16 frames du modèle vidéo et récupère
+                        # le comportement (grazing, walking...) si disponible.
+                        _vb = _video_behavior.update(int(tid), crop)
+                        if _vb:
+                            video_beh_by_tid[int(tid)] = _vb
                         # "?" = en attente d'embedding (worker pas encore prêt).
                         # On le traite comme un nouveau track pour le re-soumettre.
                         existing = track_id_to_name.get(int(tid))
@@ -938,8 +952,11 @@ def detection_loop(args):
                                 behavior_label = _b.get("action", "")
                                 break
 
+                        # Comportement vidéo (R(2+1)D) pour ce tid, si dispo
+                        video_beh = video_beh_by_tid.get(int(tid), "")
+
                         # Label affiche au-dessus de la tete : nom + comportement
-                        label = f"{display_name}  {behavior_label}".strip()
+                        label = f"{display_name}  {behavior_label}  {video_beh}".strip()
                         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
                         ly1 = max(0, y1 - th - 10)
                         ly2 = ly1 + th + 10
